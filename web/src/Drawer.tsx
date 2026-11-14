@@ -267,7 +267,7 @@ export default function Drawer({ rec, onClose, demoHistory }: Props) {
   return (
     <>
       <div className="drawer-backdrop" onClick={onClose} />
-      <aside className="drawer" role="dialog" aria-label={`attack ${rec.key}`}>
+      <aside className="drawer" role="dialog" aria-label={`attack ${rec.key}`} data-tour="drawer">
         <div className="drawer-head">
           <span className="title">
             Round {rec.round} · #{String(rec.id)} · {rec.kind}
@@ -280,7 +280,7 @@ export default function Drawer({ rec, onClose, demoHistory }: Props) {
         </div>
         <div className="drawer-body bands">
           {err && <div className="error-text">{err}</div>}
-          <section className="band">
+          <section className="band" id="band-ndi">
             <h2 className="band-title">NDI read this document</h2>
             <div className="band-ndi">
               <PageView detail={shown} page={page} />
@@ -301,11 +301,11 @@ export default function Drawer({ rec, onClose, demoHistory }: Props) {
               </div>
             </div>
           </section>
-          <section className="band">
+          <section className="band" id="band-search">
             <h2 className="band-title">Drex Search found this history</h2>
             <HistoryBand history={history} invoiceIban={normIban(iban)} />
           </section>
-          <section className="band">
+          <section className="band" id="band-drex">
             <h2 className="band-title">Drex decided</h2>
             <div className="def-cards">
               {names.map((n) => (

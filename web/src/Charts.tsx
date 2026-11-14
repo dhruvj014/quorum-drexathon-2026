@@ -1,5 +1,6 @@
 import type { RoundRecord } from "./types";
 import { defenderColor } from "./types";
+import { totalsFor } from "./stats";
 
 interface Props {
   rounds: RoundRecord[];
@@ -42,7 +43,7 @@ function LineChart({ series, xs, yMax, yFmt }: { series: Series[]; xs: number[];
           </text>
         </g>
       ))}
-      {xs.map((x) => (
+      {xs.filter((_, i) => i === xs.length - 1 || i % Math.max(1, Math.ceil(xs.length / 6)) === 0).map((x) => (
         <text key={x} x={sx(x)} y={H - 6} textAnchor="middle">
           {x}
         </text>
@@ -199,34 +200,14 @@ export function SpendChart({ rounds, defenders }: Props) {
 
 export function TotalsTable({ rounds, defenders }: Props) {
   const rows = defenders.map((d) => {
-    let attacks = 0;
-    let raw = 0;
-    let br = 0;
-    let fa = 0;
-    let fail = 0;
-    let clean = 0;
-    let model: string | null = null;
-    const meds: number[] = [];
-    for (const r of rounds) {
-      const s = r.defenders?.[d];
-      if (!s) continue;
-      attacks += r.n_attacks;
-      clean += r.n_clean ?? 0;
-      if (s.model) model = s.model;
-      raw += s.raw_breaches;
-      br += s.breaches;
-      fa += s.false_alarms;
-      fail += s.failures;
-      if (s.median_wall_ms !== null && s.median_wall_ms !== undefined) meds.push(s.median_wall_ms);
-    }
-    meds.sort((a, b) => a - b);
-    // Median of per-round medians: the exact per-call median is not in the round records.
-    const med = meds.length ? meds[Math.floor((meds.length - 1) / 2)] : null;
-    return { d, model, attacks, clean, raw, br, fa, fail, med };
+    const t = totalsFor(rounds, d);
+    return { d, model: t.model, attacks: t.poisoned, clean: t.clean, raw: t.rawBreaches, br: t.breaches,
+      fa: t.falseAlarms, fail: t.failures, med: t.medianMs === null ? null : Math.round(t.medianMs) };
   });
   return (
     <div>
       <h2>Totals</h2>
+      <div className="table-scroll" role="region" aria-label="Defender totals" tabIndex={0}>
       <table>
         <thead>
           <tr>
@@ -237,7 +218,7 @@ export function TotalsTable({ rounds, defenders }: Props) {
             <th>breaches</th>
             <th title="false alarms out of clean invoices">false al. / clean</th>
             <th>failures</th>
-            <th>median ms</th>
+            <th title="Median of per-round medians">latency ms*</th>
           </tr>
         </thead>
         <tbody>
@@ -267,6 +248,8 @@ export function TotalsTable({ rounds, defenders }: Props) {
           )}
         </tbody>
       </table>
+      </div>
+      <p className="totals-note">* Median of round medians. Each row covers the rounds where that defender was present; attack counts can differ. Failures are separate from approvals and catches.</p>
     </div>
   );
 }

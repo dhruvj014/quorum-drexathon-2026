@@ -36,7 +36,7 @@ export default function Footer({ demo }: Props) {
 
   const u = demo ?? usage;
   return (
-    <footer className="footer">
+    <footer className="footer" data-tour="usage">
       {demo && <span className="badge demo">demo data</span>}
       {down && !demo && <span className="badge down">usage unavailable</span>}
       <span>

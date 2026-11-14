@@ -111,6 +111,7 @@ export default function Dish({ attacks, defender, onSelect }: Props) {
   // Animation loop.
   useEffect(() => {
     let raf = 0;
+    const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
     let last = performance.now();
     const frame = (now: number) => {
       const dt = Math.min(64, now - last);
@@ -127,26 +128,35 @@ export default function Dish({ attacks, defender, onSelect }: Props) {
 
       // Dish.
       const g = ctx.createRadialGradient(cx, cy, R * 0.1, cx, cy, R);
-      g.addColorStop(0, "#1a2129");
-      g.addColorStop(1, "#12171d");
+      g.addColorStop(0, "#152d38");
+      g.addColorStop(0.65, "#101f2e");
+      g.addColorStop(1, "#0c1726");
+      ctx.shadowColor = "#62d4c126";
+      ctx.shadowBlur = 24;
       ctx.beginPath();
       ctx.arc(cx, cy, R, 0, Math.PI * 2);
       ctx.fillStyle = g;
       ctx.fill();
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = "#33404d";
+      ctx.shadowBlur = 0;
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#658a9270";
       ctx.stroke();
       ctx.beginPath();
       ctx.arc(cx, cy, R - 6, 0, Math.PI * 2);
       ctx.lineWidth = 1;
-      ctx.strokeStyle = "#232c36";
+      ctx.strokeStyle = "#a3d5de18";
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(cx, cy, R - 10, Math.PI * 1.08, Math.PI * 1.8);
+      ctx.strokeStyle = "#d8fff530";
       ctx.stroke();
 
       const def = defRef.current;
       for (const o of orgs.current.values()) {
         const rec = recs.current.get(o.key);
         if (!rec) continue;
-        if (now < o.born) continue;
+        if (motion.matches) o.entering = false;
+        if (now < o.born && !motion.matches) continue;
         let px: number;
         let py: number;
         if (o.entering) {
@@ -155,6 +165,9 @@ export default function Dish({ attacks, defender, onSelect }: Props) {
           px = o.fromX + (o.x - o.fromX) * e;
           py = o.fromY + (o.y - o.fromY) * e;
           if (t >= 1) o.entering = false;
+        } else if (motion.matches) {
+          px = o.x;
+          py = o.y;
         } else {
           // Slow drift with a little wobble; bounce off the inner wall.
           o.x += o.vx * dt;
@@ -193,6 +206,20 @@ export default function Dish({ attacks, defender, onSelect }: Props) {
             ctx.stroke();
           }
         } else {
+          ctx.beginPath();
+          ctx.arc(sx, sy, rad * 1.7, 0, Math.PI * 2);
+          ctx.fillStyle = color + "0a";
+          ctx.fill();
+          if (out === "breach") {
+            const pulse = motion.matches ? 0.4 : ((now / 2000 + o.phase) % 1);
+            ctx.beginPath();
+            ctx.arc(sx, sy, rad * (1 + pulse), 0, Math.PI * 2);
+            ctx.strokeStyle = color;
+            ctx.globalAlpha = (1 - pulse) * 0.4;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+          }
           const grad = ctx.createRadialGradient(sx, sy, rad * 0.15, sx, sy, rad);
           grad.addColorStop(0, color + "ee");
           grad.addColorStop(0.7, color + "99");
@@ -233,7 +260,11 @@ export default function Dish({ attacks, defender, onSelect }: Props) {
 
   return (
     <div className="canvas-wrap" ref={wrapRef}>
-      <canvas ref={canvasRef} onClick={onClick} />
+      <canvas ref={canvasRef} onClick={onClick} role="img" aria-label={`Invoice arena: ${attacks.length} invoices evaluated by ${defender}. Select an invoice in the list to inspect its evidence.`} />
+      <details className="invoice-list">
+        <summary>Inspect an invoice <span>{attacks.length}</span></summary>
+        <div>{attacks.map((rec) => <button key={rec.key} onClick={() => onSelect(rec.key)}><span className="dot" style={{ background: OUTCOME_COLORS[outcomeOf(rec, defender)] }} /> Round {rec.round} · {rec.id} · {outcomeOf(rec, defender).replace(/_/g, " ")}</button>)}</div>
+      </details>
       {attacks.length === 0 && <div className="empty">Waiting for the first round</div>}
     </div>
   );

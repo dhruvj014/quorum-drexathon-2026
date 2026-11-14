@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AttackRecord, History, Mode, RoundRecord, Usage } from "./types";
 import { MODES, MODE_TEXT, OUTCOME_COLORS, defenderColor, modeOf } from "./types";
-import { DEMO, connectLive, fetchAttacks, fetchRounds, withKey } from "./api";
+import { DEMO, connectLive, fetchAttacks, fetchRounds, fetchUsage, withKey } from "./api";
+import Tour from "./Tour";
+import type { TourApi } from "./tourSteps";
+import { isAllFailed } from "./stats";
 import { demoAttacks, demoHistory, demoRounds, demoUsage } from "./demo";
 import Dish from "./Dish";
 import { BreachChart, MinRiskChart, SpendChart, TotalsTable } from "./Charts";
 import Drawer from "./Drawer";
 import Footer from "./Footer";
 import Pipeline from "./Pipeline";
+import ErrorBoundary from "./ErrorBoundary";
 
 const REPLAY_MS = 2000;
 
@@ -45,10 +49,20 @@ function modesWithData(rounds: RoundRecord[]): { modes: Mode[]; newest: Mode | n
 }
 
 export default function App() {
-  const [attacks, setAttacks] = useState<AttackRecord[]>([]);
-  const [rounds, setRounds] = useState<RoundRecord[]>([]);
+  const [attacksRaw, setAttacks] = useState<AttackRecord[]>([]);
+  const [roundsRaw, setRounds] = useState<RoundRecord[]>([]);
+  // Rounds where every request failed were not really run (the API was refusing). They are
+  // hidden from the charts and the dish, and counted in the header so nothing is silently dropped.
+  const failedRounds = useMemo(() => new Set(roundsRaw.filter(isAllFailed).map((r) => r.round)), [roundsRaw]);
+  const rounds = useMemo(() => roundsRaw.filter((r) => !failedRounds.has(r.round)), [roundsRaw, failedRounds]);
+  const attacks = useMemo(() => attacksRaw.filter((a) => !failedRounds.has(a.round)), [attacksRaw, failedRounds]);
+  const [tourOn, setTourOn] = useState<boolean>(
+    () => DEMO || new URLSearchParams(window.location.search).get("tour") === "1",
+  );
+  const [liveUsage, setLiveUsage] = useState<Usage | null>(null);
   const [demoUse, setDemoUse] = useState<Usage | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const [live, setLive] = useState(false);
   const [defender, setDefender] = useState<string>("drex");
   const [modeChoice, setModeChoice] = useState<Mode | null>(null); // null = newest mode with data
@@ -67,6 +81,7 @@ export default function App() {
       setRounds(r);
       setDemoUse(demoUsage(a, r));
       setDemoHist(demoHistory());
+      setLoaded(true);
       return;
     }
     let alive = true;
@@ -78,6 +93,7 @@ export default function App() {
       if (r.status === "fulfilled") setRounds((cur) => r.value.reduce(upsertRound, cur));
       else errs.push(String(r.reason));
       setLoadErr(errs.length ? errs.join("; ") : null);
+      setLoaded(true);
     });
     return () => {
       alive = false;
@@ -154,21 +170,79 @@ export default function App() {
   const selectedRec = selected ? attacks.find((a) => a.key === selected) ?? null : null;
   const closeDrawer = useCallback(() => setSelected(null), []);
 
+  // Usage numbers for the guided demo's last steps.
+  useEffect(() => {
+    if (!tourOn || DEMO) return;
+    let alive = true;
+    fetchUsage()
+      .then((u) => alive && setLiveUsage(u))
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [tourOn]);
+
+  const exitTour = useCallback(() => setTourOn(false), []);
+  const tourApi: TourApi = useMemo(
+    () => ({
+      demo: DEMO,
+      attacks,
+      rounds,
+      usage: DEMO ? demoUse : liveUsage,
+      setMode: (m: Mode) => {
+        stopReplay();
+        setModeChoice(m);
+      },
+      setDefender,
+      setShownRound,
+      select: setSelected,
+    }),
+    [attacks, rounds, demoUse, liveUsage, stopReplay],
+  );
+
   return (
     <div className="app">
-      <header className="header">
-        <h1>Quorum arena</h1>
+      <header className="header" data-tour="header">
+        <div className="brand">
+          <svg className="brand-mark" width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden>
+            <circle cx="12" cy="12" r="9.25" stroke="currentColor" strokeWidth="1.5" />
+            <circle cx="9" cy="10" r="2.1" fill="#f56565" />
+            <circle cx="14.6" cy="9" r="1.5" fill="#38b2ac" />
+            <circle cx="13" cy="14.6" r="2.4" fill="#ecc94b" />
+            <circle cx="8.4" cy="15" r="0.9" fill="currentColor" />
+          </svg>
+          <h1>
+            Quorum <span>arena</span>
+          </h1>
+        </div>
         {DEMO ? (
           <span className="badge demo">demo data</span>
         ) : (
           <span className={`badge ${live ? "live" : "down"}`}>{live ? "live" : "offline, reconnecting"}</span>
         )}
+        {failedRounds.size > 0 && (
+          <span className="badge muted" title="Every request in these rounds failed (the API was refusing), so they are not shown.">
+            {failedRounds.size} failed round{failedRounds.size === 1 ? "" : "s"} hidden
+          </span>
+        )}
         {loadErr && <span className="error-text">{loadErr}</span>}
+        <div className="header-spacer" />
+        {!tourOn && (
+          <button className="btn-text primary" disabled={!loaded} onClick={() => { stopReplay(); setTourOn(true); }}>
+            Guided demo
+          </button>
+        )}
       </header>
 
-      <Pipeline rounds={rounds} demoUsage={demoUse} demoHistory={demoHist} />
+      <ErrorBoundary name="Pipeline strip">
+        <Pipeline rounds={rounds} demoUsage={demoUse} demoHistory={demoHist} />
+      </ErrorBoundary>
 
-      <section className="dish-area">
+      <section className="dish-area" data-tour="dish">
+        <div className="arena-heading">
+          <div><span className="eyebrow">ADVERSARIAL INVOICE LAB</span><h2>Can a document change a decision?</h2></div>
+          <span className="arena-count"><b>{visibleAttacks.length}</b> invoices · {visibleRounds.length} rounds</span>
+        </div>
         <div className="controls">
           <div className="group">
             <span className="label">Defender</span>
@@ -210,6 +284,7 @@ export default function App() {
             <span className="label">Round</span>
             <input
               type="range"
+              aria-label="Visible round"
               min={minRound}
               max={Math.max(maxRound, minRound)}
               step={1}
@@ -234,10 +309,12 @@ export default function App() {
           </div>
         </div>
         {modes.length > 0 && <div className="mode-text">{MODE_TEXT[mode]}</div>}
-        <Dish attacks={visibleAttacks} defender={defender} onSelect={setSelected} />
+        <ErrorBoundary name="Dish">
+          <Dish attacks={visibleAttacks} defender={defender} onSelect={setSelected} />
+        </ErrorBoundary>
         <div className="legend">
           <span>
-            <i className="dot" style={{ background: OUTCOME_COLORS.breach }} /> approved forged (breach)
+            <i className="dot" style={{ background: OUTCOME_COLORS.breach }} /> hostile approved (breach)
           </span>
           <span>
             <i className="dot" style={{ background: OUTCOME_COLORS.verify }} /> verify
@@ -257,18 +334,32 @@ export default function App() {
         </div>
       </section>
 
-      <aside className="side">
-        <div className="chart-pair">
-          <BreachChart rounds={visibleRounds} defenders={defenders} />
-          <MinRiskChart rounds={visibleRounds} defenders={defenders} />
-        </div>
-        <SpendChart rounds={visibleRounds} defenders={defenders} />
-        <TotalsTable rounds={visibleRounds} defenders={defenders} />
+      <aside className="side" data-tour="charts">
+        <ErrorBoundary name="Charts">
+          <div className="chart-pair">
+            <BreachChart rounds={visibleRounds} defenders={defenders} />
+            <MinRiskChart rounds={visibleRounds} defenders={defenders} />
+          </div>
+          <SpendChart rounds={visibleRounds} defenders={defenders} />
+          <TotalsTable rounds={visibleRounds} defenders={defenders} />
+        </ErrorBoundary>
       </aside>
 
-      <Footer demo={demoUse} />
+      <ErrorBoundary name="Usage footer">
+        <Footer demo={demoUse} />
+      </ErrorBoundary>
 
-      {selectedRec && <Drawer rec={selectedRec} onClose={closeDrawer} demoHistory={demoHist} />}
+      {selectedRec && (
+        <ErrorBoundary name="Evidence drawer" key={selectedRec.key}>
+          <Drawer rec={selectedRec} onClose={closeDrawer} demoHistory={demoHist} />
+        </ErrorBoundary>
+      )}
+
+      {tourOn && loaded && (
+        <ErrorBoundary name="Guided demo">
+          <Tour api={tourApi} onExit={exitTour} />
+        </ErrorBoundary>
+      )}
     </div>
   );
 }

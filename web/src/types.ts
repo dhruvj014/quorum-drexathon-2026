@@ -128,7 +128,8 @@ export interface History {
   ibans: HistoryIban[];
   distinct_ibans: number;
   documents_seen: number;
-  confidence: number | null;
+  // Drex Search returns a label such as "certain"; older demo data used a number.
+  confidence: number | string | null;
   matches_dataset: boolean | null;
   evidence: { file: string; page: number; quote: string }[];
   wall_ms: number | null;

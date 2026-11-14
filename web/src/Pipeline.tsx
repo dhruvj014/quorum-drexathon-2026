@@ -18,6 +18,13 @@ function fmt(v: number): string {
   return v.toLocaleString("en-US");
 }
 
+/** Search confidence is a label ("certain") from the real API, or a number in old data. */
+function fmtConfidence(v: unknown): string {
+  if (typeof v === "number" && Number.isFinite(v)) return v.toFixed(2);
+  if (typeof v === "string" && v.trim() !== "") return v;
+  return "–";
+}
+
 /** True if any of the values is a positive number. Zeros mean "not run yet". */
 function anyRun(...vs: (number | null)[]): boolean {
   return vs.some((v) => v !== null && v > 0);
@@ -34,7 +41,7 @@ function Stat({ label, value }: { label: string; value: number | null }) {
 
 function Card({ title, what, ran, children }: { title: string; what: string; ran: boolean; children: React.ReactNode }) {
   return (
-    <div className="pl-card">
+    <div className="pl-card" data-card={title.toLowerCase().replace(/\s+/g, "-")}>
       <h3>{title}</h3>
       <div className="pl-what">{what}</div>
       {ran ? children : <div className="muted-note">not run yet</div>}
@@ -96,7 +103,7 @@ export default function Pipeline({ rounds, demoUsage, demoHistory }: Props) {
   const topIban = h?.ibans?.[0]?.iban ?? null;
 
   return (
-    <section className="pipeline" aria-label="pipeline">
+    <section className="pipeline" aria-label="pipeline" data-tour="pipeline">
       <Card title="NDI" what="reads every invoice PDF" ran={anyRun(jobs, pages)}>
         <Stat label="jobs" value={jobs} />
         <Stat label="pages" value={pages} />
@@ -110,9 +117,9 @@ export default function Pipeline({ rounds, demoUsage, demoHistory }: Props) {
         {h ? (
           <div className="pl-history">
             <div className="mono">{topIban ?? "no IBAN found"}</div>
-            <div>seen in at least {fmt(h.documents_seen ?? 0)} documents</div>
+            <div>seen in at least {fmt(num(h.documents_seen) ?? 0)} documents</div>
             <div>
-              confidence {h.confidence === null || h.confidence === undefined ? "–" : h.confidence.toFixed(2)}
+              confidence {fmtConfidence(h.confidence)}
               {" · "}
               {h.matches_dataset === true ? (
                 <span className="ok">✓ matches dataset</span>
@@ -122,7 +129,7 @@ export default function Pipeline({ rounds, demoUsage, demoHistory }: Props) {
                 "dataset check –"
               )}
             </div>
-            <div>search time {h.wall_ms === null || h.wall_ms === undefined ? "–" : `${(h.wall_ms / 1000).toFixed(1)} s`}</div>
+            <div>search time {num(h.wall_ms) === null ? "–" : `${((num(h.wall_ms) ?? 0) / 1000).toFixed(1)} s`}</div>
             {h.status !== "done" && <div className="muted-note">status: {h.status}</div>}
           </div>
         ) : (

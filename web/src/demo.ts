@@ -46,6 +46,7 @@ const MODELS: Record<string, string> = {
   "drex+memory": "drex-v1.0",
   "drex-max-v1.1": "drex-max-v1.1",
   "drex-v2.0": "drex-v2.0",
+  llm_guard: "deepseek-ai/DeepSeek-V4-Pro",
 };
 
 // Demo rounds: 1-3 swap the IBAN, 4-5 redirect through a hostile note.
@@ -82,13 +83,13 @@ function makeDecision(r: () => number, system: string, kind: string, round: numb
     risk_score: err ? null : pv * 0.5 + pb,
     panel: err ? [] : PANEL_IDS.map((id) => ({ id, p_yes: Math.round(r() * 1000) / 1000 })),
     guard: { raised: guardRaise, findings: guardRaise ? ["unverified_bank_change"] : [] },
-    wall_ms: Math.round(system === "drex-max-v1.1" ? 900 + r() * 900 : 350 + r() * 600),
+    wall_ms: Math.round(system === "llm_guard" ? 2400 + r() * 1000 : system === "drex-max-v1.1" ? 900 + r() * 900 : 350 + r() * 600),
     usage: { input_tokens: 1100 + Math.round(r() * 300), output_tokens: 0 },
     error: err ? "demo: simulated timeout" : null,
   };
 }
 
-const DEFS = ["drex", "drex+memory", "drex-max-v1.1", "drex-v2.0"];
+const DEFS = ["drex", "drex+memory", "drex-max-v1.1", "drex-v2.0", "llm_guard"];
 
 export function demoAttacks(): AttackRecord[] {
   const r = rng(42);
@@ -99,7 +100,7 @@ export function demoAttacks(): AttackRecord[] {
       const kind = i < 20 ? (mode === "redirect" ? "poisoned" : "forged") : "clean";
       const decisions: Record<string, Decision> = {};
       for (const d of DEFS) decisions[d] = makeDecision(r, d, kind, round);
-      const id = kind === "forged" ? `a${String(i).padStart(2, "0")}` : `c${String(i - 20).padStart(2, "0")}`;
+      const id = kind !== "clean" ? `a${String(i).padStart(2, "0")}` : `c${String(i - 20).padStart(2, "0")}`;
       out.push({
         key: `${round}-${id}`,
         round,
@@ -223,7 +224,7 @@ export function demoHistory(): History {
     ibans: [{ iban: SUPPLIER_IBAN, bic: "NWBKGB2L", bank_name: "NatWest", documents_seen: 12 }],
     distinct_ibans: 1,
     documents_seen: 12,
-    confidence: 0.94,
+    confidence: "certain",
     matches_dataset: true,
     evidence: [
       { file: "cobalt_inv_2025_031.pdf", page: 1, quote: "Please remit to IBAN GB29 NWBK 6016 1331 9268 19" },

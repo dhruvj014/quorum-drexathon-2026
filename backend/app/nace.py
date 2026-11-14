@@ -6,8 +6,10 @@ counted in USAGE, which is appended to backend/data/usage.json on change.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+from collections import deque
 import time
 import uuid
 from datetime import datetime, timezone
@@ -38,9 +40,13 @@ def get_client() -> Any:
     """Return the one shared AsyncNaceClient (created lazily)."""
     global _client
     if _client is None:
-        from nace_sdk import AsyncNaceClient
+        from nace_sdk import AsyncNaceClient, RetryPolicy
 
-        kwargs: dict[str, Any] = {"timeout": 120.0}
+        # No SDK retry on 429 (or 403): a refusal goes to the breaker instead.
+        kwargs: dict[str, Any] = {
+            "timeout": 120.0,
+            "retry": RetryPolicy(http_statuses={408, *range(500, 600)}),
+        }
         base = os.environ.get("NACE_BASE_URL")
         if base:
             kwargs["base_url"] = base
@@ -132,19 +138,128 @@ def _to_sdk_question(q: dict[str, Any]) -> Any:
     return Noul(instructions=q.get("instructions"), criteria=q.get("criteria"))
 
 
+# ---------------------------------------------------------------- throttle / breaker
+
+DREX_PER_MINUTE: int = 100  # free tier allows 120 per minute; keep a margin
+DREX_WINDOW_S: float = 60.0  # rolling window for DREX_PER_MINUTE (tests shrink it)
+BREAKER_THRESHOLD: int = 3  # refusals in a row that open the breaker
+BREAKER_BLOCK_S: float = 120.0  # how long the breaker stays open
+
+DREX_INFLIGHT: int = 0
+DREX_INFLIGHT_MAX: int = 0
+
+_sems: dict[str, tuple[Any, asyncio.Semaphore]] = {}
+_drex_starts: deque[float] = deque()
+_refusals: int = 0
+_blocked_until: float = 0.0
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+class NaceBlocked(Exception):
+    """Raised without sending anything while the refusal breaker is open."""
+
+
+def _semaphore(kind: str) -> asyncio.Semaphore:
+    """One semaphore per kind ('drex' / 'ndi'), recreated when the event loop changes."""
+    loop = asyncio.get_running_loop()
+    held = _sems.get(kind)
+    if held is None or held[0] is not loop:
+        held = (loop, asyncio.Semaphore(config.CONCURRENCY))
+        _sems[kind] = held
+    return held[1]
+
+
+def drex_inflight_max() -> int:
+    return DREX_INFLIGHT_MAX
+
+
+def reset_throttle() -> None:
+    """Reset counters, the rate window and the breaker (for tests)."""
+    global DREX_INFLIGHT, DREX_INFLIGHT_MAX, _refusals, _blocked_until
+    DREX_INFLIGHT = DREX_INFLIGHT_MAX = 0
+    _refusals = 0
+    _blocked_until = 0.0
+    _drex_starts.clear()
+    _sems.clear()
+
+
+def is_refusal(exc: BaseException) -> bool:
+    """403/429, or an HTML page (e.g. a security checkpoint) as the body."""
+    if getattr(exc, "status", None) in (403, 429):
+        return True
+    body = getattr(exc, "body", None)
+    if isinstance(body, str):
+        head = body.lstrip()[:20].lower()
+        return head.startswith("<!doctype html") or head.startswith("<html")
+    return False
+
+
+def _check_breaker() -> None:
+    left = _blocked_until - _now()
+    if left > 0:
+        raise NaceBlocked(f"Nace refusing requests; breaker open for {left:.0f}s more")
+
+
+def _record_refusal() -> None:
+    global _refusals, _blocked_until
+    _refusals += 1
+    if _refusals >= BREAKER_THRESHOLD:
+        _blocked_until = _now() + BREAKER_BLOCK_S
+        _refusals = 0
+
+
+def _record_success() -> None:
+    global _refusals
+    _refusals = 0
+
+
+async def _rate_slot() -> None:
+    """Wait until fewer than DREX_PER_MINUTE requests started in the last window."""
+    while True:
+        now = _now()
+        while _drex_starts and now - _drex_starts[0] >= DREX_WINDOW_S:
+            _drex_starts.popleft()
+        if len(_drex_starts) < DREX_PER_MINUTE:
+            _drex_starts.append(now)
+            return
+        await asyncio.sleep(max(0.001, _drex_starts[0] + DREX_WINDOW_S - now))
+
+
 async def drex(
     state: dict[str, Any], questions: dict[str, dict[str, Any]], model: str | None = None
 ) -> dict[str, Any]:
-    """One Drex call. Returns raw answers, usage, evaluation_time_ms, request_id, wall_ms."""
+    """One Drex call. Returns raw answers, usage, evaluation_time_ms, request_id, wall_ms.
+
+    At most config.CONCURRENCY in flight and DREX_PER_MINUTE per window; raises
+    NaceBlocked without sending while the refusal breaker is open.
+    """
+    global DREX_INFLIGHT, DREX_INFLIGHT_MAX
+    _check_breaker()
     client = get_client()
     sdk_questions = {qid: _to_sdk_question(q) for qid, q in questions.items()}
-    t0 = time.perf_counter()
-    try:
-        resp = await client.system_one(
-            state, sdk_questions, model=model or config.DREX_MODEL
-        )
-    finally:
-        bump(drex_calls=1, drex_questions=len(questions))
+    async with _semaphore("drex"):
+        _check_breaker()
+        await _rate_slot()
+        _check_breaker()
+        DREX_INFLIGHT += 1
+        DREX_INFLIGHT_MAX = max(DREX_INFLIGHT_MAX, DREX_INFLIGHT)
+        t0 = time.perf_counter()
+        try:
+            resp = await client.system_one(
+                state, sdk_questions, model=model or config.DREX_MODEL
+            )
+        except Exception as exc:
+            if is_refusal(exc):
+                _record_refusal()
+            raise
+        else:
+            _record_success()
+        finally:
+            DREX_INFLIGHT -= 1
+            bump(drex_calls=1, drex_questions=len(questions))
     wall_ms = int((time.perf_counter() - t0) * 1000)
     usage = resp.usage.model_dump() if resp.usage is not None else {}
     bump(drex_input_tokens=int(usage.get("input_tokens") or 0))
@@ -192,6 +307,13 @@ async def ndi_extract(
     path: str | Path, schema: dict[str, Any], instructions: str | None = None
 ) -> dict[str, Any]:
     """Upload -> parse -> extract (parse_result source). Returns raw result + parse_ms."""
+    async with _semaphore("ndi"):
+        return await _ndi_extract(path, schema, instructions)
+
+
+async def _ndi_extract(
+    path: str | Path, schema: dict[str, Any], instructions: str | None = None
+) -> dict[str, Any]:
     client = get_client()
     p = Path(path)
     t0 = time.perf_counter()

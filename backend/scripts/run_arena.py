@@ -78,6 +78,9 @@ async def main(argv: list[str] | None = None) -> int:
         rec = await arena.run_round(r, args.attacks, args.clean, with_risk=with_risk,
                                      mode=args.mode)
         print(format_round(rec), flush=True)
+        if rec.get("all_failed"):
+            print(f"STOPPED: all requests failed in round {r} (API refusing?)", flush=True)
+            return 1
         if should_enable_risk(rec, with_risk):
             with_risk = True
             print("round 1: zero drex raw breaches; risk feedback on for later rounds", flush=True)

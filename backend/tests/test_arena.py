@@ -60,6 +60,23 @@ def test_score_counts():
     assert arena.score("other", recs)["cost_usd"] is None
 
 
+def test_score_sums_reported_cost_for_non_drex_defender():
+    """The LLM guard's Decision carries cost_usd; the round score is their sum."""
+    def guard(final: str | None, cost: float | None, error: str | None = None) -> dict:
+        d = _dec(final, error=error)
+        d["cost_usd"] = cost
+        return d
+
+    recs = [
+        {"kind": "forged", "decisions": {"llm_guard": guard("block", 0.002)}},
+        {"kind": "forged", "decisions": {"llm_guard": guard(None, 0.001, error="bad json")}},
+        {"kind": "clean", "decisions": {"llm_guard": guard(None, None, error="timeout")}},
+    ]
+    s = arena.score("llm_guard", recs)
+    assert s["cost_usd"] == pytest.approx(0.003)
+    assert s["failures"] == 2 and s["breaches"] == 0
+
+
 def test_memory_dedup_and_cap():
     mem = arena.update_memory(["a", "b"], ["b", "c"])
     assert mem == ["a", "b", "c"]
@@ -98,6 +115,12 @@ def test_parse_run_end():
 
 def test_missing_baseline_unavailable(monkeypatch):
     monkeypatch.setenv("ARENA_DREX_MODELS", "")
+    # Simulate a missing module. Once baseline.py exists and another test has imported it,
+    # `from backend.app import baseline` finds it as an attribute of the package and never
+    # looks at sys.modules, so the attribute has to go as well.
+    import backend.app as app_pkg
+
+    monkeypatch.delattr(app_pkg, "baseline", raising=False)
     monkeypatch.setitem(sys.modules, "backend.app.baseline", None)
     defenders, unavailable = arena.get_defenders()
     assert unavailable == ["llm_guard"] and set(defenders) == {"drex", "drex+memory"}

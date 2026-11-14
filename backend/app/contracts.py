@@ -97,5 +97,8 @@ class Decision(BaseModel):
     decision_ms: float | None = None
     wall_ms: int = 0
     usage: DecisionUsage = DecisionUsage()
+    # Cost of this decision's API call in USD as reported by the provider, when it reports one
+    # (the LLM guard on DeepInfra). None for Drex: its cost is derived from input tokens.
+    cost_usd: float | None = None
     error: str | None = None
     stub: bool = False

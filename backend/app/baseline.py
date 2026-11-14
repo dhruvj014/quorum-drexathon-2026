@@ -215,6 +215,7 @@ async def decide_llm(
     )
     t0 = time.perf_counter()
     in_tok = out_tok = 0
+    cost_usd: float | None = None  # stays None when the request never got a response
     try:
         body = request_body(parsed, facts, known_attacks, used_model)
         r = await _post(body)
@@ -223,6 +224,7 @@ async def decide_llm(
         in_tok = int(usage.get("prompt_tokens") or 0)
         out_tok = int(usage.get("completion_tokens") or 0)
         cost = float(usage.get("estimated_cost") or 0.0)
+        cost_usd = cost
         record_cost(base.decision_id, r.get("model") or used_model, in_tok, out_tok, cost, cost_file)
         choices = r.get("choices") or []
         if not choices:
@@ -246,6 +248,7 @@ async def decide_llm(
                 "decision_ms": float(wall_ms),
                 "wall_ms": wall_ms,
                 "usage": DecisionUsage(input_tokens=in_tok, output_tokens=out_tok),
+                "cost_usd": cost_usd,
             }
         )
     except Exception as exc:  # noqa: BLE001 - a failure is recorded, never approved
@@ -256,5 +259,7 @@ async def decide_llm(
                 "final_action": None,
                 "wall_ms": int((time.perf_counter() - t0) * 1000),
                 "usage": DecisionUsage(input_tokens=in_tok, output_tokens=out_tok),
+                # A response that was billed and then failed to parse still cost money.
+                "cost_usd": cost_usd,
             }
         )

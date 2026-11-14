@@ -98,6 +98,7 @@ def test_success_full_decision(env: dict[str, Any]) -> None:
     assert abs(sum(d.p.values()) - 1) < 1e-9
     assert d.risk_score is not None
     assert d.usage.input_tokens == 1200 and d.usage.output_tokens == 80
+    assert d.cost_usd == pytest.approx(0.0021)
     assert d.decision_ms == float(d.wall_ms)
     assert len(d.decision_id) == 32
     assert d.policy == {"L": 100, "V": 5, "D": 30}
@@ -176,6 +177,7 @@ def test_missing_key_error(env: dict[str, Any], monkeypatch: pytest.MonkeyPatch)
     install(env, lambda n: ok_response(content()))
     d = run()
     assert d.error and d.final_action is None and not env["requests"]
+    assert d.cost_usd is None  # nothing was sent, so nothing was billed
 
 
 def test_clamp_and_renormalise() -> None:
@@ -200,6 +202,8 @@ def test_parse_error_keeps_usage(env: dict[str, Any]) -> None:
     install(env, lambda n: ok_response("not json"))
     d = run()
     assert d.error and d.usage.input_tokens == 1200
+    # the call was answered and billed before parsing failed, so its cost is kept
+    assert d.cost_usd == pytest.approx(0.0021) and d.final_action is None
 
 
 def test_forged_iban_guard_raises(env: dict[str, Any]) -> None:

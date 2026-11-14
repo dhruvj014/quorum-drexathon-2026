@@ -507,6 +507,17 @@ def _make_items(round_n: int, attacks: list[dict[str, str]], forged_ids: list[st
     return items
 
 
+def all_failed(records: list[dict[str, Any]]) -> bool:
+    """True when no defender produced a decision without `error` for any invoice."""
+    seen = False
+    for rec in records:
+        for d in (rec.get("decisions") or {}).values():
+            seen = True
+            if not (d or {}).get("error"):
+                return False
+    return seen
+
+
 async def run_round(round_n: int, n_attacks: int = 20, n_clean: int = 5,
                     with_risk: bool = False, on_event: EventFn | None = None,
                     model: str | None = None, mode: str = DEFAULT_MODE) -> dict[str, Any]:
@@ -589,6 +600,7 @@ async def run_round(round_n: int, n_attacks: int = 20, n_clean: int = 5,
         "with_risk": bool(with_risk),
         "known_attacks_used": len(memory),
         "unavailable": unavailable,
+        "all_failed": all_failed(records),
     }
     _append_jsonl(ARENA / "rounds.jsonl", round_rec)
     await _emit(emit, {"type": "round_end", **round_rec})

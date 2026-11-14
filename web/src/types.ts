@@ -27,7 +27,8 @@ export interface AttackRecord {
   key: string;
   round: number;
   id: string | number;
-  kind: "forged" | "clean";
+  kind: "forged" | "poisoned" | "clean";
+  mode?: Mode;
   note: string | null;
   style: string | null;
   pdf?: string;
@@ -61,6 +62,10 @@ export interface DefenderScores {
   input_tokens: number;
   output_tokens: number;
   cost_usd: number | null;
+  model?: string | null;
+  min_risk?: number | null;
+  median_risk?: number | null;
+  max_p_approve?: number | null;
 }
 
 export interface RoundRecord {
@@ -76,7 +81,12 @@ export interface RoundRecord {
     wall_ms?: number;
     error?: string | null;
     cost_usd?: number | null;
+    isolated?: boolean;
+    recalled_pages?: number;
   };
+  mode?: Mode;
+  with_risk?: boolean;
+  known_attacks_used?: number;
   defenders: Record<string, DefenderScores>;
   memory_size?: number;
   unavailable?: string[];
@@ -94,14 +104,53 @@ export interface Usage {
   };
 }
 
-export const DEFENDERS = ["drex", "drex+memory", "llm_guard"] as const;
-export type DefenderName = (typeof DEFENDERS)[number];
+export type Mode = "swap" | "redirect";
+export const MODES: Mode[] = ["swap", "redirect"];
+export const MODE_TEXT: Record<Mode, string> = {
+  swap: "Swap: the attacker replaced the supplier's IBAN on the invoice with their own account.",
+  redirect: "Redirect: the bank details are untouched; only the note on the invoice tries to send the money elsewhere.",
+};
+/** A missing mode means swap. */
+export function modeOf(r: { mode?: string | null }): Mode {
+  return r.mode === "redirect" ? "redirect" : "swap";
+}
 
-export const DEFENDER_COLORS: Record<string, string> = {
+export interface HistoryIban {
+  iban: string;
+  bic?: string | null;
+  bank_name?: string | null;
+  documents_seen?: number;
+}
+
+export interface History {
+  supplier_id?: string;
+  status: string;
+  ibans: HistoryIban[];
+  distinct_ibans: number;
+  documents_seen: number;
+  confidence: number | null;
+  matches_dataset: boolean | null;
+  evidence: { file: string; page: number; quote: string }[];
+  wall_ms: number | null;
+  mode?: string;
+}
+
+const KNOWN_COLORS: Record<string, string> = {
   drex: "#4fd1c5",
   "drex+memory": "#9f7aea",
+  "drex-max-v1.1": "#63b3ed",
+  "drex-v2.0": "#f687b3",
   llm_guard: "#f6ad55",
 };
+const PALETTE = ["#68d391", "#fbd38d", "#b794f4", "#90cdf4", "#feb2b2", "#81e6d9", "#d6bcfa", "#faf089"];
+
+/** Stable colour per defender: known names fixed, others hashed into a palette. */
+export function defenderColor(name: string): string {
+  if (KNOWN_COLORS[name]) return KNOWN_COLORS[name];
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return PALETTE[h % PALETTE.length];
+}
 
 /** Outcome class of one record for one defender, used for colour. */
 export type Outcome = "breach" | "verify" | "block" | "error" | "clean_ok" | "false_alarm" | "none";

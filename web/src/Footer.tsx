@@ -46,6 +46,9 @@ export default function Footer({ demo }: Props) {
         NDI jobs <b>{n(u?.nace?.ndi_jobs)}</b> · pages <b>{n(u?.nace?.ndi_pages)}</b>
       </span>
       <span>
+        Drex Search calls <b>{n(u?.nace?.search_calls)}</b> · workspace files <b>{n(u?.nace?.workspace_files)}</b>
+      </span>
+      <span>
         Intern runs <b>{n(u?.intern?.runs)}</b> · turns <b>{n(u?.intern?.turns)}</b> · Drex asks <b>{n(u?.intern?.drex_asks)}</b>
       </span>
       <span>

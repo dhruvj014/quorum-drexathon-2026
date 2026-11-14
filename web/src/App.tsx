@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AttackRecord, RoundRecord, Usage } from "./types";
-import { DEFENDERS, DEFENDER_COLORS, OUTCOME_COLORS } from "./types";
+import type { AttackRecord, History, Mode, RoundRecord, Usage } from "./types";
+import { MODES, MODE_TEXT, OUTCOME_COLORS, defenderColor, modeOf } from "./types";
 import { DEMO, connectLive, fetchAttacks, fetchRounds, withKey } from "./api";
-import { demoAttacks, demoRounds, demoUsage } from "./demo";
+import { demoAttacks, demoHistory, demoRounds, demoUsage } from "./demo";
 import Dish from "./Dish";
-import { BreachChart, SpendChart, TotalsTable } from "./Charts";
+import { BreachChart, MinRiskChart, SpendChart, TotalsTable } from "./Charts";
 import Drawer from "./Drawer";
 import Footer from "./Footer";
+import Pipeline from "./Pipeline";
 
 const REPLAY_MS = 2000;
 
@@ -22,14 +23,25 @@ function upsertRound(list: RoundRecord[], rec: RoundRecord): RoundRecord[] {
   return [...list.filter((r) => r.round !== rec.round), rec].sort((a, b) => a.round - b.round);
 }
 
-/** Defenders that have any data, in the fixed order first, then any others. */
+/** Defenders that appear in the data keys, sorted by name. */
 function defendersWithData(attacks: AttackRecord[], rounds: RoundRecord[]): string[] {
   const seen = new Set<string>();
   for (const a of attacks) for (const d of Object.keys(a.decisions ?? {})) seen.add(d);
   for (const r of rounds) for (const d of Object.keys(r.defenders ?? {})) seen.add(d);
-  const fixed: string[] = DEFENDERS.filter((d) => seen.has(d));
-  const extra = [...seen].filter((d) => !fixed.includes(d)).sort();
-  return [...fixed, ...extra];
+  return [...seen].sort();
+}
+
+/** Modes that have at least one round, and the one whose latest round is newest. */
+function modesWithData(rounds: RoundRecord[]): { modes: Mode[]; newest: Mode | null } {
+  const latest = new Map<Mode, number>();
+  for (const r of rounds) {
+    const m = modeOf(r);
+    latest.set(m, Math.max(latest.get(m) ?? -Infinity, r.round));
+  }
+  const modes = MODES.filter((m) => latest.has(m));
+  let newest: Mode | null = null;
+  for (const m of modes) if (newest === null || (latest.get(m) ?? 0) >= (latest.get(newest) ?? 0)) newest = m;
+  return { modes, newest };
 }
 
 export default function App() {
@@ -39,6 +51,8 @@ export default function App() {
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [live, setLive] = useState(false);
   const [defender, setDefender] = useState<string>("drex");
+  const [modeChoice, setModeChoice] = useState<Mode | null>(null); // null = newest mode with data
+  const [demoHist, setDemoHist] = useState<History | null | undefined>(undefined);
   const [shownRound, setShownRound] = useState<number | null>(null); // null = follow latest
   const [replaying, setReplaying] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
@@ -52,6 +66,7 @@ export default function App() {
       setAttacks(a);
       setRounds(r);
       setDemoUse(demoUsage(a, r));
+      setDemoHist(demoHistory());
       return;
     }
     let alive = true;
@@ -82,27 +97,32 @@ export default function App() {
     );
   }, []);
 
-  const defenders = useMemo(() => defendersWithData(attacks, rounds), [attacks, rounds]);
+  const { modes, newest } = useMemo(() => modesWithData(rounds), [rounds]);
+  const mode: Mode = modeChoice !== null && modes.includes(modeChoice) ? modeChoice : newest ?? "swap";
+  const modeAttacks = useMemo(() => attacks.filter((a) => modeOf(a) === mode), [attacks, mode]);
+  const modeRounds = useMemo(() => rounds.filter((r) => modeOf(r) === mode), [rounds, mode]);
+
+  const defenders = useMemo(() => defendersWithData(modeAttacks, modeRounds), [modeAttacks, modeRounds]);
   useEffect(() => {
     if (defenders.length > 0 && !defenders.includes(defender)) setDefender(defenders[0]);
   }, [defenders, defender]);
 
   const maxRound = useMemo(() => {
     let m = 0;
-    for (const a of attacks) m = Math.max(m, a.round);
-    for (const r of rounds) m = Math.max(m, r.round);
+    for (const a of modeAttacks) m = Math.max(m, a.round);
+    for (const r of modeRounds) m = Math.max(m, r.round);
     return m;
-  }, [attacks, rounds]);
+  }, [modeAttacks, modeRounds]);
   const minRound = useMemo(() => {
     let m = Infinity;
-    for (const a of attacks) m = Math.min(m, a.round);
-    for (const r of rounds) m = Math.min(m, r.round);
+    for (const a of modeAttacks) m = Math.min(m, a.round);
+    for (const r of modeRounds) m = Math.min(m, r.round);
     return Number.isFinite(m) ? m : 0;
-  }, [attacks, rounds]);
+  }, [modeAttacks, modeRounds]);
   const round = shownRound === null ? maxRound : Math.min(shownRound, maxRound);
 
-  const visibleAttacks = useMemo(() => attacks.filter((a) => a.round <= round), [attacks, round]);
-  const visibleRounds = useMemo(() => rounds.filter((r) => r.round <= round), [rounds, round]);
+  const visibleAttacks = useMemo(() => modeAttacks.filter((a) => a.round <= round), [modeAttacks, round]);
+  const visibleRounds = useMemo(() => modeRounds.filter((r) => r.round <= round), [modeRounds, round]);
 
   const stopReplay = useCallback(() => {
     window.clearInterval(replayTimer.current);
@@ -146,6 +166,8 @@ export default function App() {
         {loadErr && <span className="error-text">{loadErr}</span>}
       </header>
 
+      <Pipeline rounds={rounds} demoUsage={demoUse} demoHistory={demoHist} />
+
       <section className="dish-area">
         <div className="controls">
           <div className="group">
@@ -158,11 +180,29 @@ export default function App() {
                 aria-pressed={d === defender}
                 style={
                   d === defender
-                    ? { borderColor: DEFENDER_COLORS[d] ?? "#ccc", color: DEFENDER_COLORS[d] ?? undefined, fontWeight: 600 }
+                    ? { borderColor: defenderColor(d), color: defenderColor(d), fontWeight: 600 }
                     : undefined
                 }
               >
                 {d}
+              </button>
+            ))}
+          </div>
+          <div className="group">
+            <span className="label">Mode</span>
+            {modes.length === 0 && <span className="label">none yet</span>}
+            {modes.map((m) => (
+              <button
+                key={m}
+                onClick={() => {
+                  stopReplay();
+                  setShownRound(null);
+                  setModeChoice(m);
+                }}
+                aria-pressed={m === mode}
+                style={m === mode ? { fontWeight: 600, borderColor: "var(--fg, #ddd)" } : undefined}
+              >
+                {m}
               </button>
             ))}
           </div>
@@ -193,6 +233,7 @@ export default function App() {
             )}
           </div>
         </div>
+        {modes.length > 0 && <div className="mode-text">{MODE_TEXT[mode]}</div>}
         <Dish attacks={visibleAttacks} defender={defender} onSelect={setSelected} />
         <div className="legend">
           <span>
@@ -217,23 +258,17 @@ export default function App() {
       </section>
 
       <aside className="side">
-        <div className="chart">
-          <h2>Breach rate by round</h2>
+        <div className="chart-pair">
           <BreachChart rounds={visibleRounds} defenders={defenders} />
+          <MinRiskChart rounds={visibleRounds} defenders={defenders} />
         </div>
-        <div className="chart">
-          <h2>Spend per round (tokens)</h2>
-          <SpendChart rounds={visibleRounds} defenders={defenders} />
-        </div>
-        <div>
-          <h2>Totals</h2>
-          <TotalsTable rounds={visibleRounds} defenders={defenders} />
-        </div>
+        <SpendChart rounds={visibleRounds} defenders={defenders} />
+        <TotalsTable rounds={visibleRounds} defenders={defenders} />
       </aside>
 
       <Footer demo={demoUse} />
 
-      {selectedRec && <Drawer rec={selectedRec} onClose={closeDrawer} />}
+      {selectedRec && <Drawer rec={selectedRec} onClose={closeDrawer} demoHistory={demoHist} />}
     </div>
   );
 }

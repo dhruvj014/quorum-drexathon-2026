@@ -1,5 +1,5 @@
 import type { RoundRecord } from "./types";
-import { DEFENDER_COLORS } from "./types";
+import { defenderColor } from "./types";
 
 interface Props {
   rounds: RoundRecord[];
@@ -88,7 +88,7 @@ export function BreachChart({ rounds, defenders }: Props) {
   const rate = (n: number, d: number) => (d > 0 ? n / d : 0);
   const series: Series[] = defenders.map((d) => ({
     label: d,
-    color: DEFENDER_COLORS[d] ?? "#ccc",
+    color: defenderColor(d),
     points: sorted
       .filter((r) => r.defenders?.[d])
       .map((r) => ({ x: r.round, y: rate(r.defenders[d].breaches, r.n_attacks) })),
@@ -96,7 +96,7 @@ export function BreachChart({ rounds, defenders }: Props) {
   if (defenders.includes("drex")) {
     series.push({
       label: "drex raw",
-      color: DEFENDER_COLORS.drex,
+      color: defenderColor("drex"),
       dashed: true,
       points: sorted
         .filter((r) => r.defenders?.drex)
@@ -109,6 +109,35 @@ export function BreachChart({ rounds, defenders }: Props) {
       <h2>Breach rate by round</h2>
       <LineChart series={series} xs={xs} yMax={Math.min(1, yMax * 1.1)} yFmt={(n) => `${Math.round(n * 100)}%`} />
       <Legend series={series} />
+    </div>
+  );
+}
+
+/** Lowest risk score per round per defender: shows margin even when breaches are zero. */
+export function MinRiskChart({ rounds, defenders }: Props) {
+  const sorted = [...rounds].sort((a, b) => a.round - b.round);
+  const xs = sorted.map((r) => r.round);
+  const series: Series[] = defenders
+    .map((d) => ({
+      label: d,
+      color: defenderColor(d),
+      points: sorted
+        .filter((r) => typeof r.defenders?.[d]?.min_risk === "number")
+        .map((r) => ({ x: r.round, y: r.defenders[d].min_risk as number })),
+    }))
+    .filter((s) => s.points.length > 0);
+  const yMax = Math.max(0.1, ...series.flatMap((s) => s.points.map((p) => p.y)));
+  return (
+    <div className="chart">
+      <h2>Lowest risk score by round</h2>
+      {series.length === 0 ? (
+        <div className="muted-note">no risk scores yet</div>
+      ) : (
+        <>
+          <LineChart series={series} xs={xs} yMax={yMax <= 1 ? 1 : yMax * 1.1} yFmt={(n) => n.toFixed(2)} />
+          <Legend series={series} />
+        </>
+      )}
     </div>
   );
 }
@@ -127,7 +156,7 @@ export function SpendChart({ rounds, defenders }: Props) {
     },
     ...defenders.map((d) => ({
       label: d,
-      color: DEFENDER_COLORS[d] ?? "#ccc",
+      color: defenderColor(d),
       points: sorted
         .filter((r) => r.defenders?.[d])
         .map((r) => ({ x: r.round, y: (r.defenders[d].input_tokens ?? 0) + (r.defenders[d].output_tokens ?? 0) })),
@@ -175,11 +204,15 @@ export function TotalsTable({ rounds, defenders }: Props) {
     let br = 0;
     let fa = 0;
     let fail = 0;
+    let clean = 0;
+    let model: string | null = null;
     const meds: number[] = [];
     for (const r of rounds) {
       const s = r.defenders?.[d];
       if (!s) continue;
       attacks += r.n_attacks;
+      clean += r.n_clean ?? 0;
+      if (s.model) model = s.model;
       raw += s.raw_breaches;
       br += s.breaches;
       fa += s.false_alarms;
@@ -189,7 +222,7 @@ export function TotalsTable({ rounds, defenders }: Props) {
     meds.sort((a, b) => a - b);
     // Median of per-round medians: the exact per-call median is not in the round records.
     const med = meds.length ? meds[Math.floor((meds.length - 1) / 2)] : null;
-    return { d, attacks, raw, br, fa, fail, med };
+    return { d, model, attacks, clean, raw, br, fa, fail, med };
   });
   return (
     <div>
@@ -198,10 +231,11 @@ export function TotalsTable({ rounds, defenders }: Props) {
         <thead>
           <tr>
             <th>defender</th>
+            <th>model</th>
             <th>attacks</th>
             <th>raw br.</th>
             <th>breaches</th>
-            <th>false al.</th>
+            <th title="false alarms out of clean invoices">false al. / clean</th>
             <th>failures</th>
             <th>median ms</th>
           </tr>
@@ -210,20 +244,23 @@ export function TotalsTable({ rounds, defenders }: Props) {
           {rows.map((r) => (
             <tr key={r.d}>
               <td>
-                <span className="dot" style={{ background: DEFENDER_COLORS[r.d] ?? "#ccc", marginRight: 6 }} />
+                <span className="dot" style={{ background: defenderColor(r.d), marginRight: 6 }} />
                 {r.d}
               </td>
+              <td className="model-cell" title={r.model ?? ""}>{r.model ?? "–"}</td>
               <td>{r.attacks}</td>
               <td>{r.raw}</td>
               <td>{r.br}</td>
-              <td>{r.fa}</td>
+              <td>
+                {r.fa} / {r.clean}
+              </td>
               <td>{r.fail}</td>
               <td>{r.med ?? "–"}</td>
             </tr>
           ))}
           {rows.length === 0 && (
             <tr>
-              <td colSpan={7} style={{ textAlign: "center", color: "var(--muted)" }}>
+              <td colSpan={8} style={{ textAlign: "center", color: "var(--muted)" }}>
                 no rounds yet
               </td>
             </tr>

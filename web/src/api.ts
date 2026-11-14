@@ -1,4 +1,4 @@
-import type { AttackDetail, AttackRecord, RoundRecord, Usage } from "./types";
+import type { AttackDetail, AttackRecord, History, RoundRecord, Usage } from "./types";
 
 export const DEMO = new URLSearchParams(window.location.search).get("demo") === "1";
 
@@ -38,6 +38,14 @@ export async function fetchPage(key: string): Promise<{ url: string; w: number |
   const h = Number(r.headers.get("X-Page-Height"));
   const blob = await r.blob();
   return { url: URL.createObjectURL(blob), w: w > 0 ? w : null, h: h > 0 ? h : null };
+}
+
+/** History summary for a supplier, or null if it has not been built (404). */
+export async function fetchHistory(supplierId: string): Promise<History | null> {
+  const r = await fetch(`/api/history/${encodeURIComponent(supplierId)}`);
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`/api/history/${supplierId}: HTTP ${r.status}`);
+  return (await r.json()) as History;
 }
 
 export function fetchUsage(): Promise<Usage> {

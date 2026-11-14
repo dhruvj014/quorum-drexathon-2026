@@ -85,3 +85,21 @@ def test_decide_failure_is_not_approval(monkeypatch):
     monkeypatch.setattr(nace, "drex", boom)
     d = asyncio.run(panel.decide(_parsed(), _facts()))
     assert d.error and d.raw_action is None and d.final_action is None
+
+
+def test_decide_never_below_model_action(monkeypatch):
+    async def fake(state, questions, model=None):
+        return {"answers": _answers({"approve": 0.05, "verify": 0.40, "block": 0.55}), "wall_ms": 1}
+    monkeypatch.setattr(nace, "drex", fake)
+    d = asyncio.run(panel.decide(_parsed(), _facts()))
+    assert d.raw_action == "block" and d.policy_action == "verify"
+    assert d.final_action == "block" and not d.guard.raised
+
+
+def test_decide_policy_raise_is_not_guard_raise(monkeypatch):
+    async def fake(state, questions, model=None):
+        return {"answers": _answers({"approve": 0.94, "verify": 0.0, "block": 0.06}), "wall_ms": 1}
+    monkeypatch.setattr(nace, "drex", fake)
+    d = asyncio.run(panel.decide(_parsed(), _facts()))
+    assert d.raw_action == "approve" and d.final_action == "verify"
+    assert not d.guard.raised and d.guard.findings == []

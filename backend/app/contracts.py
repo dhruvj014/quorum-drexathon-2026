@@ -87,6 +87,7 @@ class Decision(BaseModel):
     model: str = ""
     raw_action: str | None = None
     final_action: str | None = None
+    policy_action: str | None = None
     p: dict[str, float] = {}
     risk_score: float | None = None
     panel: list[PanelAnswer] = []

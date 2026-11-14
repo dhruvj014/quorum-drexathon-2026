@@ -180,19 +180,20 @@ async def decide(
         answers = r["answers"]
         panel = [PanelAnswer(id=q, p_yes=_p_yes(answers[q])) for q in NOUL_IDS]
         p = _probs(answers["action"])
-        raw_action = max(ACTIONS, key=lambda a: (p[a], policy_mod.ORDER[a]))
-        chosen = policy_mod.choose(p, L=L, V=V, D=D)
-        final, findings = policy_mod.guard(chosen, facts)
+        res = policy_mod.resolve(p, facts, L=L, V=V, D=D)
         usage = r.get("usage") or {}
         return base.model_copy(
             update={
                 "model": r.get("model") or base.model,
-                "raw_action": raw_action,
-                "final_action": final,
+                "raw_action": res["raw_action"],
+                "policy_action": res["policy_action"],
+                "final_action": res["final_action"],
                 "p": p,
                 "risk_score": policy_mod.risk_score(p),
                 "panel": panel,
-                "guard": GuardResult(raised=final != chosen, findings=findings),
+                "guard": GuardResult(
+                    raised="guard" in res["raised_by"], findings=res["findings"]
+                ),
                 "request_id": r.get("request_id"),
                 "decision_ms": r.get("evaluation_time_ms"),
                 "wall_ms": int(r.get("wall_ms", 0)),

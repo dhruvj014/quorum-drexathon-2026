@@ -105,3 +105,48 @@ def guard(action: str, facts: Facts | dict[str, Any]) -> tuple[str, list[str]]:
     new_action = {v: k for k, v in ORDER.items()}.get(current_order, action)
 
     return new_action, findings
+
+
+def raw_action_of(p: dict[str, float]) -> str:
+    """Most probable action; ties go to the higher (stricter) action."""
+    for key in p:
+        _check_action(key)
+    return max(ORDER, key=lambda a: (p.get(a, 0.0), ORDER[a]))
+
+
+def resolve(
+    p: dict[str, float],
+    facts: Facts | dict[str, Any],
+    L: float = 100,
+    V: float = 5,
+    D: float = 30,
+) -> dict[str, Any]:
+    """Combine model, policy and guard into one action that never goes below any of them.
+
+    Returns {"raw_action", "policy_action", "final_action", "findings", "raised_by"}.
+    raised_by lists "policy" (policy above raw) and/or "guard" (guard raised it further).
+    Raises ValueError on an unknown action key.
+    """
+    raw = raw_action_of(p)
+    policy_action = choose(p, L, V, D)
+    start = raw if ORDER[raw] >= ORDER[policy_action] else policy_action
+    final, findings = guard(start, facts)
+
+    raised_by: list[str] = []
+    if ORDER[policy_action] > ORDER[raw]:
+        raised_by.append("policy")
+    if ORDER[final] > ORDER[start]:
+        raised_by.append("guard")
+
+    if not (ORDER[final] >= ORDER[raw] and ORDER[final] >= ORDER[policy_action]
+            and ORDER[final] >= ORDER[start]):
+        raise AssertionError(
+            f"final {final!r} below raw {raw!r} / policy {policy_action!r} / guard input {start!r}"
+        )
+    return {
+        "raw_action": raw,
+        "policy_action": policy_action,
+        "final_action": final,
+        "findings": findings,
+        "raised_by": raised_by,
+    }

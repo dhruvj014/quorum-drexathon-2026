@@ -293,3 +293,80 @@ def test_guard_verify_input_without_findings_stays_verify() -> None:
     new_action, findings = guard("verify", facts)
     assert new_action == "verify"
     assert "unverified_bank_change" in findings
+
+
+# ---------------------------------------------------------------------------
+# resolve
+# ---------------------------------------------------------------------------
+
+from decimal import Decimal  # noqa: E402
+
+from backend.app.policy import resolve  # noqa: E402
+
+_GUARD_FACTS: dict[str, Facts] = {
+    "clean": _clean_facts(),
+    "iban_unreadable": _clean_facts(iban_status="not_found"),
+    "supplier_unknown": _clean_facts(supplier_known=False, supplier_id=None),
+    "unverified_bank_change": _clean_facts(iban_matches_trusted=False),
+    "duplicate_paid": _clean_facts(duplicate_invoice_number=True),
+}
+
+
+def _grid() -> list[dict[str, float]]:
+    out = []
+    for a in range(11):
+        for v in range(11 - a):
+            b = 10 - a - v
+            out.append({k: float(Decimal(n) / 10) for k, n in
+                        (("approve", a), ("verify", v), ("block", b))})
+    return out
+
+
+@pytest.mark.parametrize("name", list(_GUARD_FACTS))
+def test_resolve_final_never_below_raw_grid(name: str) -> None:
+    facts = _GUARD_FACTS[name]
+    for p in _grid():
+        res = resolve(p, facts)
+        final = ORDER[res["final_action"]]
+        assert final >= ORDER[res["raw_action"]], (p, res)
+        assert final >= ORDER[res["policy_action"]], (p, res)
+        assert final >= ORDER[guard(res["policy_action"], facts)[0]], (p, res)
+        assert final >= ORDER[guard(res["raw_action"], facts)[0]], (p, res)
+        if name != "clean":
+            assert name in res["findings"]
+        if res["final_action"] == res["raw_action"]:
+            assert res["raised_by"] == []
+
+
+def test_resolve_block_majority_stays_block() -> None:
+    p = {"approve": 0.05, "verify": 0.40, "block": 0.55}
+    assert choose(p) == "verify"  # the policy alone would lower it
+    res = resolve(p, _clean_facts())
+    assert res["raw_action"] == "block"
+    assert res["policy_action"] == "verify"
+    assert res["final_action"] == "block"
+    assert res["raised_by"] == []
+
+
+def test_resolve_policy_raises() -> None:
+    res = resolve({"approve": 0.94, "verify": 0.0, "block": 0.06}, _clean_facts())
+    assert res["raw_action"] == "approve" and res["final_action"] == "verify"
+    assert res["raised_by"] == ["policy"]
+
+
+def test_resolve_guard_raises() -> None:
+    res = resolve({"approve": 0.99, "verify": 0.01, "block": 0.0},
+                  _clean_facts(duplicate_invoice_number=True))
+    assert res["final_action"] == "block"
+    assert res["raised_by"] == ["guard"]
+    assert res["findings"] == ["duplicate_paid"]
+
+
+def test_resolve_raw_tie_goes_higher() -> None:
+    res = resolve({"approve": 0.5, "verify": 0.0, "block": 0.5}, _clean_facts())
+    assert res["raw_action"] == "block" and res["final_action"] == "block"
+
+
+def test_resolve_unknown_action_raises() -> None:
+    with pytest.raises(ValueError):
+        resolve({"approve": 0.5, "pay": 0.5}, _clean_facts())

@@ -199,14 +199,117 @@ def test_no_zero_claim_when_all_defenders_failed() -> None:
                                        "drex+memory": dec("approve", "approve", error="timeout")})
             for i in range(3)]
     rep = ar.build_report(rows, [])
-    t = rep["totals"]
-    assert t["raw_breaches_all"] == 0 and t["defenders"]["drex"]["scored"] == 0
-    assert t["defenders"]["drex"]["forged_failures"] == 3
+    assert rep["rounds"] == [] and rep["totals"]["rounds"] == 0
+    assert rep["skipped_rounds"][0]["reason"] == ar.SKIP_ALL_FAILED
+    assert rep["skipped_rounds"][0]["failures"] == {"drex": 3, "drex+memory": 3}
     md = ar.render_md(rep)
     assert "0 raw breaches" not in md
-    assert "No scored defender results" in md
-    assert "drex 0/3 forged scored, 3 forged failures" in md
+    assert "No scored rounds" in md and "| swap | 1 | attacks.jsonl | all defender requests failed |" in md
     assert "unavailable: llm_guard" not in md  # never observed in these inputs
+
+
+# --- skipped rounds ------------------------------------------------------------------------
+def _failed_round(rnd: int, mode: str = "swap") -> list[dict[str, Any]]:
+    out = [row(rnd, f"f{rnd}-{i}", "forged" if mode == "swap" else "poisoned",
+               {"drex": dec(None, None, error="http 500"), "drex+memory": dec(None, None, error="timeout")})
+           for i in range(3)]
+    out.append(row(rnd, f"c{rnd}", "clean", {"drex": dec(None, None, error="http 503")}))
+    for r in out:
+        r["mode"] = mode
+    return out
+
+
+def test_complete_failure_rounds_skipped_and_excluded_from_totals() -> None:
+    rows = round1_rows() + [r for n in (18, 19, 20, 21) for r in _failed_round(n)]
+    rep = ar.build_report(rows, [])
+    assert [r["round"] for r in rep["rounds"]] == [1]
+    assert [(s["mode"], s["round"], s["reason"]) for s in rep["skipped_rounds"]] == [
+        ("swap", n, ar.SKIP_ALL_FAILED) for n in (18, 19, 20, 21)]
+    base = ar.build_report(round1_rows(), [])
+    assert rep["totals"] == base["totals"]  # failed rounds add nothing to totals
+    assert rep["totals_by_mode"] == base["totals_by_mode"]
+    md = ar.render_md(rep)
+    table = md.split("## Per round")[1].split("## Totals")[0]
+    assert "| 18 |" not in table and "| 1 | drex |" in table
+    skipped = md.split("## Skipped rounds")[1]
+    for n in (18, 19, 20, 21):
+        assert f"| swap | {n} | attacks.jsonl | all defender requests failed |" in skipped
+
+
+def test_partial_success_round_kept_and_failures_not_caught() -> None:
+    rows = _failed_round(5)
+    rows[0]["decisions"]["drex+memory"] = dec("block", "block")  # one usable decision
+    rep = ar.build_report(rows, [])
+    assert rep["skipped_rounds"] == [] and [r["round"] for r in rep["rounds"]] == [5]
+    d = rep["totals"]["defenders"]
+    assert d["drex+memory"]["caught"] == 1 and d["drex+memory"]["failures"] == 3  # 2 errors + 1 missing
+    assert d["drex"]["caught"] == 0 and d["drex"]["breaches"] == 0 and d["drex"]["failures"] == 4
+    assert d["drex"]["scored"] == 0
+
+
+def test_partial_success_on_clean_row_only_is_kept() -> None:
+    rows = _failed_round(6)
+    rows[-1]["decisions"]["drex"] = dec("approve", "approve")
+    rep = ar.build_report(rows, [])
+    assert rep["skipped_rounds"] == [] and rep["totals"]["defenders"]["drex"]["caught"] == 0
+    assert "0 raw breaches" not in ar.render_md(rep)  # no forged decision was scored
+
+
+def test_modes_skipped_separately() -> None:
+    swap_ok = row(3, "s", "forged", {"drex": dec("block", "block")})
+    rows = [swap_ok] + _failed_round(3, "redirect") + _failed_round(4, "swap")
+    rep = ar.build_report(rows, [])
+    assert [(r["mode"], r["round"]) for r in rep["rounds"]] == [("swap", 3)]
+    assert sorted((s["mode"], s["round"]) for s in rep["skipped_rounds"]) == [("redirect", 3), ("swap", 4)]
+    assert rep["modes"] == ["swap"] and "redirect" not in rep["totals_by_mode"]
+    md = ar.render_md(rep)
+    swap_md, redirect_md = md.split("# Quorum arena: redirect")
+    assert "| swap | 4 |" in swap_md and "| redirect | 3 |" not in swap_md
+    assert "| redirect | 3 | attacks.jsonl | all defender requests failed |" in redirect_md
+    assert "No scored rounds" in redirect_md and "0 raw breaches" not in redirect_md
+
+
+def test_rounds_only_complete_failure_skipped_partial_kept() -> None:
+    failed = record(18, {"drex": {"raw_breaches": 0, "breaches": 0, "caught": 0, "failures": 5,
+                                  "false_alarms": 0}})
+    empty = record(19, {"drex": {"raw_breaches": 0, "breaches": 0, "caught": 0, "failures": 0,
+                                 "false_alarms": 0}})
+    none = record(20, {}, unavailable=["drex"])
+    partial = record(21, {"drex": {"raw_breaches": 0, "breaches": 0, "caught": 1, "failures": 4,
+                                   "false_alarms": 0, "median_risk": 0.7, "cost_usd": 0.01}})
+    clean_only = record(22, {"llm_guard": {"raw_breaches": 0, "breaches": 0, "caught": 0, "failures": 3,
+                                           "false_alarms": 0, "cost_usd": 0.002}})
+    rep = ar.build_report([], [failed, empty, none, partial, clean_only])
+    assert {s["round"]: s["reason"] for s in rep["skipped_rounds"]} == {
+        18: ar.SKIP_ALL_FAILED, 19: ar.SKIP_NO_USABLE, 20: ar.SKIP_NO_DEFENDERS}
+    assert all(s["source"] == "rounds.jsonl" for s in rep["skipped_rounds"])
+    kept = {r["round"]: r for r in rep["rounds"]}
+    assert set(kept) == {21, 22}
+    assert kept[21]["defenders"]["drex"]["median_risk"] == 0.7
+    assert rep["totals"]["defenders"]["drex"]["caught"] == 1
+    assert rep["totals"]["defenders"]["drex"]["failures"] == 4
+    assert rep["totals"]["defenders"]["llm_guard"]["cost_usd"] == Decimal("0.002")
+    assert rep["totals"]["rounds"] == 2
+
+
+def test_no_claim_when_every_round_skipped() -> None:
+    rep = ar.build_report(_failed_round(18) + _failed_round(19), [])
+    assert rep["rounds"] == [] and rep["modes"] == [] and len(rep["skipped_rounds"]) == 2
+    md = ar.render_md(rep)
+    assert "0 raw breaches" not in md and "No scored rounds: all 2 rounds" in md
+
+
+def test_cli_writes_skipped_rounds(tmp_path: Path, capsys: Any) -> None:
+    write_jsonl(tmp_path / "attacks.jsonl", round1_rows() + _failed_round(18))
+    write_jsonl(tmp_path / "rounds.jsonl", [round1_record()])
+    assert ar.main(["--dir", str(tmp_path)]) == 0
+    data = json.loads((tmp_path / "report.json").read_text())
+    assert [{k: s[k] for k in ("mode", "round", "reason")} for s in data["skipped_rounds"]] == [
+        {"mode": "swap", "round": 18, "reason": ar.SKIP_ALL_FAILED}]
+    assert [r["round"] for r in data["rounds"]] == [1] and data["totals"]["rounds"] == 1
+    md = (tmp_path / "report.md").read_text()
+    assert "## Skipped rounds" in md and "| swap | 18 | attacks.jsonl | all defender requests failed |" in md
+    assert "1 skipped rounds" in capsys.readouterr().out
 
 
 def test_modes_and_dynamic_defenders_are_separate() -> None:

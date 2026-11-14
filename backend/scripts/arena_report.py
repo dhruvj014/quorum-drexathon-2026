@@ -399,6 +399,56 @@ def totals(rounds: list[dict[str, Any]], names: list[str]) -> dict[str, Any]:
 
 
 
+SKIP_NO_DEFENDERS = "no defender results recorded"
+SKIP_ALL_FAILED = "all defender requests failed"
+SKIP_NO_USABLE = "no usable decisions"
+
+
+def usable_decisions(s: dict[str, Any], source: str) -> int:
+    """Rows on which one defender gave a usable (non-failed) decision in one round (pure)."""
+    if source == "rounds.jsonl":
+        # Only counts are recorded. Decisions are proven by breaches, caught or false alarms.
+        # Without those, every attack row failed; a clean approve counts only for clean rows
+        # left over after the recorded failures, and only when failures were recorded at all.
+        # An all-zero record is missing evidence, not a clean run.
+        proven = int(s.get("breaches") or 0) + int(s.get("caught") or 0) + int(s.get("false_alarms") or 0)
+        if proven:
+            return proven
+        failures = int(s.get("failures") or 0)
+        if not failures:
+            return 0
+        clean_failures = max(failures - int(s.get("forged") or 0), 0)
+        return max(int(s.get("clean") or 0) - clean_failures, 0)
+    return ((int(s.get("forged") or 0) - int(s.get("forged_failures") or 0))
+            + (int(s.get("clean") or 0) - int(s.get("clean_failures") or 0)))
+
+
+def skip_reason(r: dict[str, Any]) -> str | None:
+    """Why a (mode, round) must be left out of the report, or None to keep it (pure).
+
+    A round is kept when any defender has at least one usable decision, so partial-success
+    rounds always stay in. Otherwise it is skipped: no defender results at all, every
+    attempted request failed, or nothing usable was attempted.
+    """
+    defs = r.get("defenders") or {}
+    if not defs:
+        return SKIP_NO_DEFENDERS
+    source = r.get("source", "attacks.jsonl")
+    if any(usable_decisions(s, source) > 0 for s in defs.values()):
+        return None
+    if any(int(s.get("failures") or 0) > 0 for s in defs.values()):
+        return SKIP_ALL_FAILED
+    return SKIP_NO_USABLE
+
+
+def skipped_entry(r: dict[str, Any], reason: str) -> dict[str, Any]:
+    """Record of a skipped round for report.json (pure)."""
+    return {"mode": r["mode"], "round": r["round"], "source": r.get("source"), "reason": reason,
+            "n_attacks": r.get("n_attacks", 0), "n_clean": r.get("n_clean", 0),
+            "failures": {n: int(s.get("failures") or 0) for n, s in (r.get("defenders") or {}).items()},
+            "unavailable": list(r.get("unavailable") or [])}
+
+
 def build_report(attack_rows: list[dict[str, Any]], round_rows: list[dict[str, Any]],
                  names: list[str] | None = None) -> dict[str, Any]:
     """Whole report from the parsed jsonl rows (pure). Rounds are keyed by (mode, round)."""
@@ -426,6 +476,7 @@ def build_report(attack_rows: list[dict[str, Any]], round_rows: list[dict[str, A
     order = {m: i for i, m in enumerate(KNOWN_MODES)}
     keys = sorted(set(by_key) | set(records), key=lambda k: (order.get(k[0], len(order)), k[0], k[1]))
     rounds: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
     discrepancies: list[dict[str, Any]] = []
     for key in keys:
         mode, n = key
@@ -439,11 +490,16 @@ def build_report(attack_rows: list[dict[str, Any]], round_rows: list[dict[str, A
             r["source"] = "attacks.jsonl"
             discrepancies += d
             warnings += w
+        reason = skip_reason(r)
+        if reason is not None:
+            skipped.append(skipped_entry(r, reason))
+            continue
         rounds.append(r)
     modes = list(dict.fromkeys(r["mode"] for r in rounds))
     return {"data_line": DATA_LINE, "defenders": list(names), "modes": modes, "rounds": rounds,
             "totals": totals(rounds, names),
             "totals_by_mode": {m: totals([r for r in rounds if r["mode"] == m], names) for m in modes},
+            "skipped_rounds": skipped,
             "discrepancies": discrepancies, "warnings": warnings}
 
 
@@ -550,13 +606,37 @@ def _render_mode_md(report: dict[str, Any]) -> str:
               "", f"Data: {DATA_LINE}."]
     if report["discrepancies"]:
         lines += ["", f"Discrepancies between attacks.jsonl and rounds.jsonl: {len(report['discrepancies'])} (see report.json)."]
+    lines += _skipped_md(report.get("skipped_rounds") or [])
+    return "\n".join(lines) + "\n"
+
+
+def _skipped_md(skipped: list[dict[str, Any]]) -> list[str]:
+    """Markdown section listing skipped rounds; empty when nothing was skipped (pure)."""
+    if not skipped:
+        return []
+    out = ["", "## Skipped rounds", "",
+           f"{len(skipped)} rounds left out of every total, table and claim above: "
+           "no defender produced a usable decision.", "",
+           "| mode | round | source | reason |", "|---|---|---|---|"]
+    out += [f"| {s['mode']} | {s['round']} | {s.get('source') or 'n/a'} | {s['reason']} |" for s in skipped]
+    return out
+
+
+def _render_skipped_only_md(mode: str, skipped: list[dict[str, Any]]) -> str:
+    """Section for a mode whose every round was skipped: no numbers and no claim (pure)."""
+    lines = [f"# Quorum arena: {mode}", "",
+             f"**No scored rounds: all {len(skipped)} rounds in this mode were skipped; "
+             "no breach claim is made.**"]
+    lines += _skipped_md(skipped)
     return "\n".join(lines) + "\n"
 
 
 def render_md(report: dict[str, Any]) -> str:
     """Render each mode separately so unlike attacks are never combined in the narrative."""
     modes = report.get("modes", [])
-    if not modes:
+    skipped = report.get("skipped_rounds") or []
+    skip_only = [m for m in dict.fromkeys(s["mode"] for s in skipped) if m not in modes]
+    if not modes and not skip_only:
         return _render_mode_md(report)
     sections = []
     for mode in modes:
@@ -564,10 +644,13 @@ def render_md(report: dict[str, Any]) -> str:
         part["rounds"] = [r for r in report["rounds"] if r["mode"] == mode]
         part["totals"] = report["totals_by_mode"][mode]
         part["discrepancies"] = [d for d in report["discrepancies"] if d.get("mode") == mode]
+        part["skipped_rounds"] = [s for s in skipped if s["mode"] == mode]
         rendered = _render_mode_md(part).replace("# Quorum arena", f"# Quorum arena: {mode}", 1)
         if mode == "redirect":
             rendered = rendered.replace("forged", "poisoned")
         sections.append(rendered.rstrip())
+    for mode in skip_only:
+        sections.append(_render_skipped_only_md(mode, [s for s in skipped if s["mode"] == mode]).rstrip())
     return "\n\n".join(sections) + "\n"
 
 
@@ -599,6 +682,7 @@ def main(argv: list[str] | None = None) -> int:
     (d / "report.md").write_text(render_md(report), encoding="utf-8")
     t = report["totals"]
     print(f"{t['rounds']} rounds, {t['attacks']} attacks, {t['clean']} clean; "
+          f"{len(report['skipped_rounds'])} skipped rounds; "
           f"{len(report['discrepancies'])} discrepancies; wrote {d / 'report.json'} and {d / 'report.md'}")
     return 0
 

@@ -143,20 +143,24 @@ The clerk prompt is `intern/prompts/clerk.md`. The clerk worker is `deepinfra/de
 
 ### Benchmark (`run_bench.py`)
 
-Measured on the `test` split before the Phase 7 policy update: 95 synthetic test cases (constructed scenarios on synthetic invoices, not real fraud cases). A new run is needed to measure the updated policy. These results do not show real-world performance. Full tables: [`backend/data/results.md`](backend/data/results.md) (generated, git-ignored).
+Measured on the `test` split with the Phase 7 policy: 95 synthetic test cases (constructed scenarios on synthetic invoices, not real fraud cases). These results do not show real-world performance. Full tables: [`backend/BENCHMARK.md`](backend/BENCHMARK.md).
 
 | System | Expected action | Failures | Unsafe approvals | Unnecessary escalations | Median decision ms | p95 decision ms | Cost per 1,000 decisions |
 |---|---|---:|---|---|---:|---:|---:|
-| Drex (`drex-max-finance`) | 95/95 | 0 | 0/57 | 0/38 | 291 | 392 | $0.0358 (estimated, input-token price only) |
-| LLM guard (DeepInfra `deepseek-ai/DeepSeek-V4-Pro`) | 95/95 | 0 | 0/57 | 0/38 | 2946 | 24381 | $2.3109 (provider-reported) |
+| Drex (`drex-max-finance`) | 95/95 | 0 | 0/57 | 0/38 | 939 | 1837 | $0.0358 (estimated, input-token price only) |
+| LLM guard (DeepInfra `deepseek-ai/DeepSeek-V4-Pro`) | 95/95 | 0 | 0/57 | 0/38 | 2504 | 4636 | $1.7668 (provider-estimated) |
 
 - Latency and cost cover the decision stage only. NDI parsing and warm-up calls are excluded.
 - Costs hold for this sample only.
-- The report was recomputed from stored live decisions without model calls. The original run used five discarded warm-up calls per system.
+- The run used five discarded warm-up calls per system.
+- Both systems receive the same state and questions. Their prompts differ: the LLM guard is explicitly told not to follow instructions in invoice text; the Drex questions do not include that line.
 
-### Pending
+### Arena results
 
-- Arena (`run_arena.py`, `arena_report.py`): pending, no results.
+These results use synthetic invoices and attacks written by an LLM red-team agent. The underlying [arena snapshot](results/arena/NOTES.md) and [generated report](results/arena/report.md) are included.
+
+- Swap mode: 0 breaches in 200 attacks over 10 rounds. The deterministic bank mismatch check forces at least verify, so this mostly measures the full pipeline.
+- Redirect mode, valid full rounds 12–17: 120 poisoned and 30 clean invoices. Model approvals / final approvals / false alarms on clean invoices: Drex 68 / 9 / 0; Drex with memory 43 / 2 / 2; drex-max-v1.1 23 / 0 / 2; drex-v2.0 0 / 0 / 30. The report also includes the smaller valid round 11, so its redirect totals are 128 poisoned and 32 clean. Rounds 18–21 were failed requests and are excluded.
 
 ### Test status
 
@@ -187,6 +191,13 @@ Himanshu built these parts with Intern. Turn and token counts are the verified f
 | Benchmark correction | 23 | 581,588 | 24,906 | unknown |
 | Benchmark tests | 13 | 318,832 | 14,536 | unknown |
 | README update | 8 | 110,592 | 6,585 | unknown |
-| **Total** | **255** | **5,413,812** | **314,694** | unknown |
+| README results update | 9 | 113,204 | 3,591 | unknown |
+| Benchmark provenance correction | 15 | 323,686 | 16,801 | unknown |
+| Benchmark provenance tests | 12 | 293,231 | 7,571 | unknown |
+| README benchmark update | 7 | 72,021 | 3,514 | unknown |
+| Clerk isolation | 19 | 417,967 | 14,536 | unknown |
+| Arena schema update (stopped after System 1 error) | 22 | 485,502 | 36,494 | unknown |
+| Arena failed-round handling | 20 | 399,784 | 19,253 | unknown |
+| **Total** | **359** | **7,519,207** | **416,454** | unknown |
 
 Dhruv wrote the pipeline core (contracts, config, nace, intake, checks, policy, panel, forge, `smoke.py`, `forge_demo.py` and the `intern/` Docker setup) in commit `65e4d5b`, then the arena loop and red-team prompt (`4e1daa9`), the read-only API server and WebSocket hub (`d0abcf6`), the web UI (`0375873`) and hardening (`992e1d6`).

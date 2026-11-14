@@ -295,6 +295,6 @@ def _clean_facts() -> Facts:
     return facts(_invoice(), _trusted())
 
 
-@pytest.mark.xfail(strict=True, reason="guard treats an unknown action as approve")
 def test_guard_unknown_action_is_not_approve() -> None:
-    assert guard(None, _clean_facts())[0] != "approve"  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        guard(None, _clean_facts())  # type: ignore[arg-type]

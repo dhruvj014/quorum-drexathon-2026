@@ -97,6 +97,7 @@ def test_parse_run_end():
 
 
 def test_missing_baseline_unavailable(monkeypatch):
+    monkeypatch.setenv("ARENA_DREX_MODELS", "")
     monkeypatch.setitem(sys.modules, "backend.app.baseline", None)
     defenders, unavailable = arena.get_defenders()
     assert unavailable == ["llm_guard"] and set(defenders) == {"drex", "drex+memory"}
@@ -134,7 +135,8 @@ def test_run_round_with_fakes(tmp_arena, monkeypatch):
     forged_iban_notes: list[str] = []
     rnd = {"n": 0}
 
-    async def fake_attacker(round_n, n, model=None, history=None, with_risk=False):
+    async def fake_attacker(round_n, n, model=None, history=None, with_risk=False,
+                            mode="swap"):
         rnd["n"] += 1
         notes = [{"note": f"r{round_n}-ok", "style": "body"},
                  {"note": f"r{round_n}-bad", "style": "faint"},
@@ -181,7 +183,7 @@ def test_run_round_with_fakes(tmp_arena, monkeypatch):
                         lambda: [{"doc_id": f"d{i}"} for i in range(10)])
     events: list[dict] = []
 
-    r1 = asyncio.run(arena.run_round(1, 3, 2, on_event=events.append))
+    r1 = asyncio.run(arena.run_round(1, 3, 2, on_event=events.append, mode="swap"))
     assert all(m == [] for m in seen_memory)  # round 1 sees no own notes
     d = r1["defenders"]["drex"]
     assert d["breaches"] == 1 and d["raw_breaches"] == 1 and d["failures"] == 2
@@ -196,13 +198,14 @@ def test_run_round_with_fakes(tmp_arena, monkeypatch):
     assert arena.load_memory() == ["r1-ok"]
     recs = arena.load_history()
     assert len(recs) == 5 and {r["kind"] for r in recs} == {"forged", "clean"}
-    assert set(recs[0]) == {"round", "id", "kind", "note", "style", "pdf", "doc_hash", "decisions"}
+    assert set(recs[0]) == {"round", "mode", "id", "kind", "note", "style", "pdf",
+                            "doc_hash", "decisions"}
     types = [e["type"] for e in events]
     assert types[0] == "round_start" and types[-1] == "round_end" and types.count("decision") == 5
 
     assert arena.next_round() == 2
     seen_memory.clear()
-    r2 = asyncio.run(arena.run_round(2, 3, 2, with_risk=True))
+    r2 = asyncio.run(arena.run_round(2, 3, 2, with_risk=True, mode="swap"))
     assert r2["with_risk"] is True and r2["known_attacks_used"] == 1
     assert seen_memory and all(m == ["r1-ok"] for m in seen_memory)
     assert arena.load_memory() == ["r1-ok", "r2-ok"]
@@ -304,5 +307,118 @@ def test_format_round_risk_and_warning():
                          "drex+memory": {"raw_breaches": 0, "breaches": 0, "false_alarms": 0,
                                          "failures": 0, "min_risk": 0.5312}}}
     line = ra.format_round(rec)
-    assert "drex min_risk=-" in line and "drex+memory min_risk=0.531" in line
+    assert line.startswith("round 1 mode=swap:")
+    assert "min_risk=- |" in line and "min_risk=0.531 |" in line
     assert "warning=attacker exit code 1" in line
+
+
+# ---- arena v2 -------------------------------------------------------------
+
+def test_mode_helpers_and_feedback_filter():
+    assert arena.mode_of({}) == "swap" and arena.mode_of({"mode": "redirect"}) == "redirect"
+    assert arena.kind_for("redirect") == "poisoned" and arena.kind_for("swap") == "forged"
+    hist = [
+        {"kind": "forged", "note": "old", "decisions": {"drex": _dec("block")}},
+        {"kind": "poisoned", "mode": "redirect", "note": "pay {IBAN}",
+         "decisions": {"drex": _dec("approve")}},
+    ]
+    assert [f["note"] for f in arena.feedback(hist, mode="swap")] == ["old"]
+    assert [f["note"] for f in arena.feedback(hist, mode="redirect")] == ["pay {IBAN}"]
+
+
+def test_parse_attacks_redirect_needs_iban():
+    text = "\n".join(json.dumps(x) for x in [
+        {"note": "send to {IBAN} now", "style": "body"},
+        {"note": "no token here", "style": "body"}])
+    assert [a["note"] for a in arena.parse_attacks(text, 5, "redirect")] == ["send to {IBAN} now"]
+    assert len(arena.parse_attacks(text, 5, "swap")) == 2
+
+
+def test_score_counts_poisoned_as_attack():
+    recs = [{"kind": "poisoned", "decisions": {"drex": {**_dec("approve"),
+                                                        "model": "m1"}}}]
+    s = arena.score("drex", recs)
+    assert s["breaches"] == 1 and s["model"] == "m1"
+
+
+def test_extra_drex_models(monkeypatch):
+    monkeypatch.setattr(arena.config, "DREX_MODEL", "a")
+    monkeypatch.setenv("ARENA_DREX_MODELS", "a, b,b,,c")
+    assert arena.extra_drex_models() == ["b", "c"]
+    defs, _ = arena.get_defenders()
+    assert "b" in defs and "c" in defs and "a" not in defs
+    monkeypatch.setenv("ARENA_DREX_MODELS", "")
+    assert arena.extra_drex_models() == []
+
+
+def test_model_defender_passes_model(monkeypatch):
+    seen = {}
+
+    async def fake_decide(parsed, facts, system="drex", model=None, **kw):
+        seen.update(system=system, model=model)
+        return Decision(system=system, model=model or "")
+
+    monkeypatch.setattr(arena.panel, "decide", fake_decide)
+    d = asyncio.run(arena._model_defender("m2")(ParsedInvoice(), arena.Facts(), []))
+    assert seen == {"system": "m2", "model": "m2"} and d.model == "m2"
+
+
+def test_recalled_pages():
+    out = "\n".join([
+        json.dumps({"type": "memory_recall", "pages": [{"name": "p1"}, "p2"]}),
+        "not json",
+        json.dumps({"type": "turn"}),
+        json.dumps({"type": "memory_recall", "page": "p1"}),
+    ])
+    assert arena.recalled_pages(out) == ["p1", "p2"]
+    assert arena.recalled_pages("") == []
+
+
+def test_attacker_env_and_home(tmp_arena):
+    env = arena.attacker_env(Path("/x/h"), {"PATH": "/bin", "INTERN_HOME": "/old"})
+    assert env == {"PATH": "/bin", "INTERN_HOME": "/x/h"}
+    h1 = arena.new_attacker_home(3)
+    h2 = arena.new_attacker_home(3)
+    assert h1.is_dir() and h2.is_dir() and h1 != h2 and h2.name == "round-3-2"
+
+
+def test_run_round_unknown_mode(tmp_arena):
+    with pytest.raises(ValueError):
+        asyncio.run(arena.run_round(1, 1, 0, mode="nope"))
+
+
+def test_make_items_redirect(tmp_arena, monkeypatch):
+    calls = []
+
+    def fake_forge(doc_id, note, style="body", new_iban=None, out_path=None):
+        calls.append((note, new_iban))
+        return {"path": str(out_path), "doc_id": doc_id}
+
+    monkeypatch.setattr(arena.forge, "forge_invoice", fake_forge)
+    items = arena._make_items(1, [{"note": "pay {IBAN}", "style": "body"}], ["d1"], [],
+                              "redirect")
+    assert items[0]["kind"] == "poisoned"
+    note, new_iban = calls[0]
+    assert new_iban is None and "{IBAN}" not in note and note.startswith("pay ")
+
+
+def test_redirect_prompt_renders():
+    text = arena.render_prompt(4, 8, "redirect")
+    assert "round 4" in text and "8 different" in text and "{IBAN}" in text
+    assert "{n}" not in text and "{round}" not in text
+
+
+def test_round_line_mode_stored(tmp_arena, monkeypatch):
+    async def fake_attacker(round_n, n, model=None, history=None, with_risk=False, mode="swap"):
+        return {"attacks": [{"note": "pay {IBAN}", "style": "body"}], "error": None,
+                "isolated": True, "intern_home": "h", "recalled_pages": []}
+
+    monkeypatch.setattr(arena, "run_attacker", fake_attacker)
+    monkeypatch.setattr(arena, "_make_items", lambda *a, **k: [])
+    monkeypatch.setattr(arena, "get_defenders", lambda: ({}, []))
+    try:
+        rec = asyncio.run(arena.run_round(1, 1, 0, mode="redirect"))
+    except Exception as exc:  # pragma: no cover - surface shape problems clearly
+        pytest.fail(f"run_round failed: {exc}")
+    assert rec["mode"] == "redirect"
+    assert rec["attacker"]["isolated"] is True and rec["attacker"]["recalled_pages"] == []

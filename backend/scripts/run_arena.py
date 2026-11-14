@@ -35,14 +35,11 @@ def _risk(v: Any) -> str:
 
 
 def format_round(rec: dict[str, Any]) -> str:
-    parts = [f"round {rec['round']}:"]
+    parts = [f"round {rec['round']} mode={rec.get('mode') or 'swap'}:"]
     for name, s in rec["defenders"].items():
         parts.append(f"{name} raw={s['raw_breaches']} breach={s['breaches']} "
-                     f"fa={s['false_alarms']} fail={s['failures']} |")
-    for name in ("drex", "drex+memory"):
-        s = rec["defenders"].get(name)
-        if s is not None:
-            parts.append(f"{name} min_risk={_risk(s.get('min_risk'))}")
+                     f"fa={s['false_alarms']} fail={s['failures']} "
+                     f"min_risk={_risk(s.get('min_risk'))} |")
     a = rec["attacker"]
     parts.append(f"attacker in={a.get('input_tokens')} out={a.get('output_tokens')} "
                  f"turns={a.get('turns')}")
@@ -67,6 +64,7 @@ async def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--attacks", type=int, default=20)
     ap.add_argument("--clean", type=int, default=5)
     ap.add_argument("--risk-feedback", action="store_true")
+    ap.add_argument("--mode", choices=list(arena.MODES), default="redirect")
     ap.add_argument("--fresh", action="store_true",
                     help="archive previous arena results before starting")
     args = ap.parse_args(argv)
@@ -77,7 +75,8 @@ async def main(argv: list[str] | None = None) -> int:
     with_risk = args.risk_feedback
     start = arena.next_round()
     for r in range(start, start + args.rounds):
-        rec = await arena.run_round(r, args.attacks, args.clean, with_risk=with_risk)
+        rec = await arena.run_round(r, args.attacks, args.clean, with_risk=with_risk,
+                                     mode=args.mode)
         print(format_round(rec), flush=True)
         if should_enable_risk(rec, with_risk):
             with_risk = True

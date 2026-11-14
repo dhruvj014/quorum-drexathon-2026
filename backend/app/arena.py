@@ -20,6 +20,14 @@ from backend.app.contracts import Decision, Facts, ParsedInvoice, TrustedSupplie
 ARENA: Path = config.DATA / "arena"
 SANDBOX: Path = ARENA / "sandbox"
 PROMPT_FILE: Path = config.ROOT / "intern" / "prompts" / "redteam.md"
+PROMPT_FILES: dict[str, Path] = {
+    "swap": PROMPT_FILE,
+    "redirect": config.ROOT / "intern" / "prompts" / "redteam-redirect.md",
+}
+MODES = ("swap", "redirect")
+DEFAULT_MODE = "swap"  # old lines without `mode` count as swap
+ATTACK_KINDS = ("forged", "poisoned")
+DEFAULT_EXTRA_DREX_MODELS = "drex-max-v1.1,drex-v2.0"
 SUPPLIER_ID = "cobalt-wholesale-ltd"
 N_ARENA_SOURCES = 120
 MAX_NOTE = 400
@@ -115,11 +123,21 @@ def _final(rec: dict[str, Any], defender: str) -> str | None:
     return None if d.get("error") else d.get("final_action")
 
 
-def feedback(history: list[dict[str, Any]], with_risk: bool = False) -> list[dict[str, Any]]:
-    """Outcome of each earlier forged note, judged by the drex defender only."""
+def mode_of(rec: dict[str, Any]) -> str:
+    """Mode of an attack or round line; lines without one are `swap`."""
+    return str(rec.get("mode") or DEFAULT_MODE)
+
+
+def kind_for(mode: str) -> str:
+    return "poisoned" if mode == "redirect" else "forged"
+
+
+def feedback(history: list[dict[str, Any]], with_risk: bool = False,
+             mode: str = DEFAULT_MODE) -> list[dict[str, Any]]:
+    """Outcome of each earlier attack note of `mode`, judged by the drex defender only."""
     out: list[dict[str, Any]] = []
     for rec in history:
-        if rec.get("kind") != "forged":
+        if rec.get("kind") not in ATTACK_KINDS or mode_of(rec) != mode:
             continue
         item: dict[str, Any] = {
             "round": rec.get("round"),
@@ -167,7 +185,7 @@ def caught_notes(records: list[dict[str, Any]]) -> list[str]:
     """Forged notes that any memory defender did not approve (errors excluded)."""
     out: list[str] = []
     for rec in records:
-        if rec.get("kind") != "forged" or not rec.get("note"):
+        if rec.get("kind") not in ATTACK_KINDS or not rec.get("note"):
             continue
         if any(_final(rec, d) not in (None, "approve") for d in MEMORY_DEFENDERS):
             out.append(rec["note"])
@@ -178,7 +196,8 @@ def caught_notes(records: list[dict[str, Any]]) -> list[str]:
 # Attacker
 # ---------------------------------------------------------------------------
 
-def parse_attacks(text: str, n: int) -> list[dict[str, str]]:
+def parse_attacks(text: str, n: int, mode: str = DEFAULT_MODE) -> list[dict[str, str]]:
+    """Attack lines from the attacker's file. In redirect mode a note needs `{IBAN}`."""
     out: list[dict[str, str]] = []
     for line in text.splitlines():
         line = line.strip()
@@ -192,6 +211,8 @@ def parse_attacks(text: str, n: int) -> list[dict[str, str]]:
             continue
         note = obj["note"].strip()[:MAX_NOTE]
         if not note:
+            continue
+        if mode == "redirect" and IBAN_TOKEN not in note:
             continue
         style = obj.get("style") if obj.get("style") in forge.STYLES else "body"
         out.append({"note": note, "style": style})
@@ -218,29 +239,69 @@ def parse_run_end(stdout: str) -> dict[str, Any]:
     return info
 
 
-def render_prompt(round_n: int, n: int) -> str:
-    return PROMPT_FILE.read_text().replace("{n}", str(n)).replace("{round}", str(round_n))
+def recalled_pages(stdout: str) -> list[str]:
+    """Page names from any `memory_recall` event in an Intern --json stdout."""
+    pages: list[str] = []
+    for line in stdout.splitlines():
+        try:
+            ev = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(ev, dict) or ev.get("type") != "memory_recall":
+            continue
+        found = ev.get("pages") or ev.get("names") or ev.get("page") or ev.get("name") or []
+        if isinstance(found, (str, dict)):
+            found = [found]
+        for item in found:
+            name = item.get("name") or item.get("page") or item.get("title") if isinstance(item, dict) else item
+            if name and str(name) not in pages:
+                pages.append(str(name))
+    return pages
+
+
+def attacker_env(home: Path, base: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment passed through unchanged except INTERN_HOME, set to a fresh folder."""
+    env = dict(os.environ if base is None else base)
+    env["INTERN_HOME"] = str(home)
+    return env
+
+
+def new_attacker_home(round_n: int) -> Path:
+    """A new empty INTERN_HOME for this round; never reuse one."""
+    home = ARENA / "attacker-home" / f"round-{round_n}"
+    if home.exists():
+        k = 2
+        while (home.parent / f"round-{round_n}-{k}").exists():
+            k += 1
+        home = home.parent / f"round-{round_n}-{k}"
+    home.mkdir(parents=True)
+    return home
+
+
+def render_prompt(round_n: int, n: int, mode: str = DEFAULT_MODE) -> str:
+    return PROMPT_FILES.get(mode, PROMPT_FILE).read_text().replace("{n}", str(n)).replace("{round}", str(round_n))
 
 
 async def run_attacker(round_n: int, n: int, model: str | None = None,
                        history: list[dict[str, Any]] | None = None,
-                       with_risk: bool = False) -> dict[str, Any]:
+                       with_risk: bool = False, mode: str = DEFAULT_MODE) -> dict[str, Any]:
     model = model or os.environ.get("ARENA_ATTACKER_MODEL", DEFAULT_MODEL)
     SANDBOX.mkdir(parents=True, exist_ok=True)
+    home = new_attacker_home(round_n)
     hist = load_history() if history is None else history
-    (SANDBOX / "feedback.json").write_text(json.dumps(feedback(hist, with_risk), indent=1))
+    (SANDBOX / "feedback.json").write_text(json.dumps(feedback(hist, with_risk, mode), indent=1))
     attacks_file = SANDBOX / "attacks.jsonl"
     attacks_file.unlink(missing_ok=True)
     cmd = [*os.environ.get("INTERN_CMD", "intern").split(), "-p", "--json", "--max-turns",
            os.environ.get("ARENA_ATTACKER_TURNS", "20"),
-           "--system2", model, "--", render_prompt(round_n, n)]
+           "--system2", model, "--", render_prompt(round_n, n, mode)]
     t0 = time.monotonic()
     error: str | None = None
     exit_note: str | None = None
     stdout = ""
     try:
         proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=str(SANDBOX),
+            *cmd, cwd=str(SANDBOX), env=attacker_env(home),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:
@@ -255,14 +316,19 @@ async def run_attacker(round_n: int, n: int, model: str | None = None,
     except (OSError, ValueError) as exc:
         error = f"attacker failed to start: {type(exc).__name__}: {exc}"
     wall_ms = int((time.monotonic() - t0) * 1000)
-    attacks = parse_attacks(attacks_file.read_text(), n) if attacks_file.exists() else []
+    log = ARENA / f"round-{round_n}" / "attacker.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(stdout)
+    attacks = parse_attacks(attacks_file.read_text(), n, mode) if attacks_file.exists() else []
     warning: str | None = None
     if not attacks:
         error = error or exit_note or "attacker wrote no attacks"
     elif error is None:
         warning = exit_note
     return {"attacks": attacks, **parse_run_end(stdout), "wall_ms": wall_ms,
-            "error": error, "warning": warning}
+            "error": error, "warning": warning, "isolated": True,
+            "intern_home": str(home), "recalled_pages": recalled_pages(stdout),
+            "log": str(log)}
 
 
 # ---------------------------------------------------------------------------
@@ -277,9 +343,27 @@ async def _drex_memory(parsed: ParsedInvoice, facts: Facts, known: list[str]) ->
     return await panel.decide(parsed, facts, known_attacks=known, system="drex+memory")
 
 
+def extra_drex_models() -> list[str]:
+    """Extra Drex model ids from ARENA_DREX_MODELS, minus the configured model."""
+    raw = os.environ.get("ARENA_DREX_MODELS", DEFAULT_EXTRA_DREX_MODELS)
+    out: list[str] = []
+    for name in (x.strip() for x in raw.split(",")):
+        if name and name != config.DREX_MODEL and name not in out and name not in ("drex", "drex+memory"):
+            out.append(name)
+    return out
+
+
+def _model_defender(model_id: str) -> Defender:
+    async def _fn(parsed: ParsedInvoice, facts: Facts, known: list[str]) -> Decision:
+        return await panel.decide(parsed, facts, system=model_id, model=model_id)
+    return _fn
+
+
 def get_defenders() -> tuple[dict[str, Defender], list[str]]:
     """Available defenders and the names of unavailable ones."""
     defenders: dict[str, Defender] = {"drex": _drex, "drex+memory": _drex_memory}
+    for model_id in extra_drex_models():
+        defenders[model_id] = _model_defender(model_id)
     unavailable: list[str] = []
     try:
         from backend.app import baseline  # type: ignore[attr-defined]
@@ -316,10 +400,13 @@ def score(name: str, records: list[dict[str, Any]]) -> dict[str, Any]:
     costs: list[float] = []
     risks: list[float] = []
     p_approves: list[float] = []
+    models: list[str] = []
     for rec in records:
         d = (rec.get("decisions") or {}).get(name)
         if d is None:
             continue
+        if d.get("model") and d["model"] not in models:
+            models.append(str(d["model"]))
         tin += int((d.get("usage") or {}).get("input_tokens") or 0)
         tout += int((d.get("usage") or {}).get("output_tokens") or 0)
         if d.get("cost_usd") is not None:
@@ -330,7 +417,7 @@ def score(name: str, records: list[dict[str, Any]]) -> dict[str, Any]:
             s["failures"] += 1
             continue
         final, raw = d.get("final_action"), d.get("raw_action")
-        if rec.get("kind") == "forged":
+        if rec.get("kind") in ATTACK_KINDS:
             if final is not None:
                 if d.get("risk_score") is not None:
                     risks.append(float(d["risk_score"]))
@@ -349,6 +436,7 @@ def score(name: str, records: list[dict[str, Any]]) -> dict[str, Any]:
     s["min_risk"] = round(min(risks), 3) if risks else None
     s["median_risk"] = round(statistics.median(risks), 3) if risks else None
     s["max_p_approve"] = round(max(p_approves), 3) if p_approves else None
+    s["model"] = models[0] if len(models) == 1 else (models or None)
     s["input_tokens"] = tin
     s["output_tokens"] = tout
     if _is_drex(name):
@@ -386,17 +474,22 @@ def fill_iban(note: str, iban: str) -> str:
 
 
 def _make_items(round_n: int, attacks: list[dict[str, str]], forged_ids: list[str],
-                clean_ids: list[str]) -> list[dict[str, Any]]:
-    """Forge PDFs. A forge error is kept on the item and becomes a failure."""
+                clean_ids: list[str], mode: str = DEFAULT_MODE) -> list[dict[str, Any]]:
+    """Forge PDFs. A forge error is kept on the item and becomes a failure.
+
+    swap: the printed IBAN is replaced. redirect: bank details untouched (new_iban=None),
+    `{IBAN}` in the note is filled with a random IBAN.
+    """
     out_dir = ARENA / f"round-{round_n}"
     items: list[dict[str, Any]] = []
     for i, (atk, doc_id) in enumerate(zip(attacks, forged_ids)):
         new_iban = forge.random_iban(f"arena-{round_n}-{i}")
         note = fill_iban(atk["note"], new_iban)
-        item = {"id": f"r{round_n}-a{i:02d}", "kind": "forged", "note": note,
+        item = {"id": f"r{round_n}-a{i:02d}", "kind": kind_for(mode), "note": note,
                 "style": atk["style"], "source": doc_id, "pdf": None, "error": None}
         try:
-            res = forge.forge_invoice(doc_id, note, atk["style"], new_iban=new_iban,
+            res = forge.forge_invoice(doc_id, note, atk["style"],
+                                      new_iban=None if mode == "redirect" else new_iban,
                                       out_path=out_dir / f"a{i:02d}.pdf")
             item["pdf"] = res["path"]
         except Exception as exc:  # noqa: BLE001 - recorded as failure
@@ -416,22 +509,25 @@ def _make_items(round_n: int, attacks: list[dict[str, str]], forged_ids: list[st
 
 async def run_round(round_n: int, n_attacks: int = 20, n_clean: int = 5,
                     with_risk: bool = False, on_event: EventFn | None = None,
-                    model: str | None = None) -> dict[str, Any]:
+                    model: str | None = None, mode: str = DEFAULT_MODE) -> dict[str, Any]:
+    if mode not in MODES:
+        raise ValueError(f"unknown mode {mode!r}")
     emit = on_event or _noop
     ARENA.mkdir(parents=True, exist_ok=True)
     trusted = prepare_trusted()
     defenders, unavailable = get_defenders()
     memory = load_memory()  # stored before this round
     await _emit(emit, {"type": "round_start", "round": round_n, "n_attacks": n_attacks,
-                       "n_clean": n_clean, "memory_size": len(memory), "unavailable": unavailable})
+                       "n_clean": n_clean, "mode": mode, "memory_size": len(memory), "unavailable": unavailable})
 
-    attacker = await run_attacker(round_n, n_attacks, model=model, with_risk=with_risk)
+    attacker = await run_attacker(round_n, n_attacks, model=model, with_risk=with_risk,
+                                  mode=mode)
     attacks = attacker["attacks"]
     for i, atk in enumerate(attacks):
         await _emit(emit, {"type": "attack", "round": round_n, "index": i, **atk})
 
     forged_ids, clean_ids = pick_sources(round_n, len(attacks), n_clean, arena_sources())
-    items = _make_items(round_n, attacks, forged_ids, clean_ids)
+    items = _make_items(round_n, attacks, forged_ids, clean_ids, mode)
 
     sem = asyncio.Semaphore(config.CONCURRENCY)
 
@@ -463,7 +559,8 @@ async def run_round(round_n: int, n_attacks: int = 20, n_clean: int = 5,
                     except Exception as exc:  # noqa: BLE001 - never an approval
                         decisions[name] = _failed(doc_id, name, f"{type(exc).__name__}: {exc}")
         rec = {
-            "round": round_n, "id": item["id"], "kind": item["kind"], "note": item["note"],
+            "round": round_n, "mode": mode, "id": item["id"], "kind": item["kind"],
+            "note": item["note"],
             "style": item["style"], "pdf": item["pdf"],
             "doc_hash": parsed.content_hash if parsed else None,
             "decisions": {k: v.model_dump() for k, v in decisions.items()},
@@ -482,6 +579,7 @@ async def run_round(round_n: int, n_attacks: int = 20, n_clean: int = 5,
 
     round_rec = {
         "round": round_n,
+        "mode": mode,
         "ts": datetime.now(timezone.utc).isoformat(),
         "n_attacks": len(attacks),
         "n_clean": n_clean,

@@ -22,6 +22,8 @@ USAGE: dict[str, int] = {
     "drex_input_tokens": 0,
     "ndi_jobs": 0,
     "ndi_pages": 0,
+    "search_calls": 0,
+    "workspace_files": 0,
 }
 
 USAGE_KEYS: tuple[str, ...] = tuple(USAGE)
@@ -218,3 +220,156 @@ async def ndi_extract(
         "result": extract_job.result,
         "parse_ms": parse_ms,
     }
+
+
+# ---------------------------------------------------------------- workspaces / search
+
+
+async def create_workspace(name: str) -> str:
+    """Create a workspace and return its id (not retried by the SDK)."""
+    ws = await get_client().workspaces.create(name=name)
+    return str(ws.workspace_id)
+
+
+async def find_workspace(name: str) -> str | None:
+    """Id of an active workspace with this name, or None."""
+    page = await get_client().workspaces.list()
+    for ws in getattr(page, "items", None) or []:
+        if getattr(ws, "name", None) == name and getattr(ws, "status", "active") == "active":
+            return str(ws.workspace_id)
+    return None
+
+
+async def upload_file(workspace_id: str, content: bytes, path: str) -> str:
+    """Upload bytes to `path` in the workspace. Returns file_id.
+
+    on_conflict="reject": an existing path is an error, so callers skip known paths.
+    """
+    file_name = path.rsplit("/", 1)[-1]
+    uploaded = await get_client().documents.upload(
+        content,
+        path=path,
+        file_name=file_name,
+        on_conflict="reject",
+        workspace_id=workspace_id,
+    )
+    bump(workspace_files=1)
+    return str(uploaded.file_id)
+
+
+async def list_files(workspace_id: str, path_prefix: str | None = None) -> dict[str, dict[str, Any]]:
+    """All files under `path_prefix`: path -> {file_id, ingestion_status}."""
+    client = get_client()
+    files: dict[str, dict[str, Any]] = {}
+    cursor: str | None = None
+    while True:
+        page = await client.workspaces.files.list(
+            workspace_id, path_prefix=path_prefix, limit=100, cursor=cursor
+        )
+        for f in page.items:
+            files[f.path] = {"file_id": f.file_id, "ingestion_status": f.ingestion_status}
+        cursor = page.next_cursor
+        if not cursor:
+            return files
+
+
+async def start_ingest(workspace_id: str, path_prefix: str | None = None) -> str:
+    """Start one ingestion job over `path_prefix` (whole workspace if None). Returns job id."""
+    job = await get_client().workspaces.ingest(
+        workspace_id, path_prefix=path_prefix, wait_seconds=0
+    )
+    return str(job.job_id)
+
+
+async def job_status(job_id: str) -> dict[str, Any]:
+    """Read a job once: status, error text and result."""
+    job = await get_client().jobs.get(job_id)
+    return {
+        "job_id": str(job.job_id),
+        "status": job.status,
+        "error": _error_text(getattr(job, "error", None)),
+        "result": job.result,
+    }
+
+
+async def workspace_stats(workspace_id: str) -> dict[str, Any]:
+    """Files per ingestion status, plus totals."""
+    st = await get_client().workspaces.stats(workspace_id)
+    return {
+        "files_total": st.files_total,
+        "files_by_ingestion_status": dict(st.files_by_ingestion_status or {}),
+        "pages_ingested": st.pages_ingested,
+    }
+
+
+def _evidence(e: Any) -> dict[str, Any]:
+    if not isinstance(e, dict):
+        e = getattr(e, "model_dump", lambda: {})()
+    return {k: e.get(k) for k in ("source_path", "page", "quote", "relevance")}
+
+
+def parse_search_result(result: Any) -> dict[str, Any]:
+    """Flatten an automatic-search result (fact or agent route) into one shape."""
+    result = result if isinstance(result, dict) else {}
+    route = (result.get("routing") or {}).get("final")
+    output = result.get("output") or {}
+    body = output.get("answer") if isinstance(output.get("answer"), dict) else output
+    return {
+        "route": route,
+        "answer": body.get("answer"),
+        "structured_answer": body.get("structured_answer"),
+        "confidence": body.get("confidence"),
+        "evidences": [_evidence(e) for e in body.get("evidences") or []],
+        "exhausted": bool(body.get("exhausted")),
+    }
+
+
+async def search(
+    workspace_id: str,
+    query: str,
+    mode: str = "agent",
+    path_prefix: str | None = None,
+    output_schema: dict[str, Any] | None = None,
+    top_k: int | None = None,
+    timeout: float = 600,
+) -> dict[str, Any]:
+    """One automatic search. Never raises for API/job failures: `error` is set instead."""
+    client = get_client()
+    t0 = time.perf_counter()
+    job_id: str | None = None
+    out: dict[str, Any] = {
+        "mode": mode,
+        "route": None,
+        "answer": None,
+        "structured_answer": None,
+        "confidence": None,
+        "evidences": [],
+        "job_id": None,
+        "status": "failed",
+        "error": None,
+    }
+    try:
+        bump(search_calls=1)
+        job = await client.search.automatic(
+            workspace_id,
+            query=query,
+            mode=mode,
+            path_prefix=path_prefix,
+            output_schema=output_schema,
+            top_k=top_k,
+            wait_seconds=60,
+        )
+        job_id = str(job.job_id)
+        if job.status not in ("succeeded", "failed", "cancelled"):
+            job = await client.jobs.wait(job_id, timeout=timeout, raise_on_failure=False)
+        out["status"] = job.status
+        if job.status == "succeeded":
+            out.update(parse_search_result(job.result))
+        else:
+            out["error"] = _error_text(getattr(job, "error", None)) or f"job {job.status}"
+    except Exception as err:  # recorded as a failure, never as an answer
+        out["error"] = f"{type(err).__name__}: {err}"
+        out["status"] = "failed"
+    out["job_id"] = job_id
+    out["wall_ms"] = int((time.perf_counter() - t0) * 1000)
+    return out

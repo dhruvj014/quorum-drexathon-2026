@@ -16,7 +16,7 @@ If `web/dist` exists, it is served at `/`.
 - `GET /api/usage` →
   ```json
   {
-    "nace":   {"ts": "...", "drex_calls": 0, "drex_questions": 0, "drex_input_tokens": 0, "ndi_jobs": 0, "ndi_pages": 0},
+    "nace":   {"ts": "...", "drex_calls": 0, "drex_questions": 0, "drex_input_tokens": 0, "ndi_jobs": 0, "ndi_pages": 0, "search_calls": 0, "workspace_files": 0},
     "intern": {"runs": 0, "turns": 0, "drex_asks": 0, "input_tokens": 0, "output_tokens": 0},
     "arena":  {"rounds": 0, "attacks": 0, "attacker_input_tokens": 0, "attacker_output_tokens": 0, "attacker_turns": 0}
   }
@@ -25,4 +25,16 @@ If `web/dist` exists, it is served at `/`.
   - `intern` is summed over the `run_end` events in `intern-logs/*.jsonl`.
   - `arena` is summed over `arena/rounds.jsonl`.
   - Any missing file gives zeros.
+  - `search_calls` counts Drex Search requests; `workspace_files` counts files uploaded to a workspace.
+- `GET /api/history/{supplier_id}` → summary of `history/{supplier_id}.json` (written by `scripts/build_history.py`; no API call), or 404 if missing or the id is invalid:
+  ```json
+  {
+    "supplier_id": "cobalt-wholesale-ltd", "status": "done",
+    "ibans": [{"iban": "GB18...", "bic": "...", "bank_name": "...", "documents_seen": 60}],
+    "distinct_ibans": 1, "documents_seen": 60, "confidence": 0.9, "matches_dataset": true,
+    "evidence": [{"file": "doc.pdf", "page": 1, "quote": "IBAN: ..."}],
+    "wall_ms": 12345, "mode": "agent"
+  }
+  ```
+  - `ibans` are normalised (no spaces, upper case). `evidence` holds up to 3 quotes, with the file name only. `status` is `"ingesting"` if the build stopped before ingestion finished.
 - `WS /ws` → first message `{"type": "hello"}`, then `{"type": "attack", "data": AttackRecord}` (with no `key`; build it as `"{round}-{id}"`) and `{"type": "round", "data": RoundRecord}` as lines are appended to the arena files.

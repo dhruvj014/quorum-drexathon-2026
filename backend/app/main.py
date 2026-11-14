@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
-from backend.app import config, nace
+from backend.app import config, history, nace
 from backend.app.hub import Hub
 
 PAGE_DPI = 110
@@ -29,6 +29,8 @@ NACE_ZERO: dict[str, int] = {
     "drex_input_tokens": 0,
     "ndi_jobs": 0,
     "ndi_pages": 0,
+    "search_calls": 0,
+    "workspace_files": 0,
 }
 
 hub = Hub()
@@ -262,6 +264,14 @@ def report() -> Any:
 def usage() -> dict:
     data = data_dir()
     return {"nace": nace_usage(data), "intern": intern_usage(data), "arena": arena_usage(data)}
+
+
+@app.get("/api/history/{supplier_id}")
+def supplier_history(supplier_id: str) -> dict:
+    h = history.load_history(supplier_id, data_dir())
+    if h is None:
+        raise HTTPException(status_code=404, detail="no history for supplier")
+    return {**history.history_summary(h), "wall_ms": h.get("wall_ms"), "mode": h.get("mode")}
 
 
 @app.websocket("/ws")

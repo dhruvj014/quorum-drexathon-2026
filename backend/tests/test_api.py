@@ -122,11 +122,37 @@ def test_usage_full(full: Path) -> None:
     u = TestClient(main.app).get("/api/usage").json()
     # Fixture lines carry no run_id: one legacy run, its last line counts.
     assert u["nace"] == {"drex_calls": 6, "drex_questions": 7, "drex_input_tokens": 8,
-                         "ndi_jobs": 9, "ndi_pages": 10}
+                         "ndi_jobs": 9, "ndi_pages": 10, "search_calls": 0, "workspace_files": 0}
     assert u["intern"] == {"runs": 2, "turns": 8, "drex_asks": 14,
                            "input_tokens": 200, "output_tokens": 40}
     assert u["arena"] == {"rounds": 2, "attacks": 3, "attacker_input_tokens": 150,
                           "attacker_output_tokens": 15, "attacker_turns": 5}
+
+
+def test_history_route(data: Path) -> None:
+    (data / "history").mkdir()
+    saved = {
+        "supplier_id": "cobalt-wholesale-ltd", "mode": "agent", "wall_ms": 4321, "confidence": 0.8,
+        "matches_dataset": True,
+        "structured_answer": {"ibans": [{"iban": "gb18 1790", "bic": "B", "bank_name": "N", "documents_seen": 5}]},
+        "evidences": [{"source_path": "invoices/cobalt/x.pdf", "page": 1, "quote": "IBAN: GB18 1790"}],
+    }
+    (data / "history" / "cobalt-wholesale-ltd.json").write_text(json.dumps(saved))
+    r = TestClient(main.app).get("/api/history/cobalt-wholesale-ltd")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["wall_ms"] == 4321 and body["mode"] == "agent"
+    assert body["ibans"][0]["iban"] == "GB181790"
+    assert body["distinct_ibans"] == 1 and body["matches_dataset"] is True
+    assert body["evidence"] == [{"file": "x.pdf", "page": 1, "quote": "IBAN: GB18 1790"}]
+
+
+def test_history_route_missing(data: Path) -> None:
+    assert TestClient(main.app).get("/api/history/cobalt-wholesale-ltd").status_code == 404
+
+
+def test_history_route_bad_id(data: Path) -> None:
+    assert TestClient(main.app).get("/api/history/Bad_ID").status_code == 404
 
 
 def test_websocket_hello(data: Path) -> None:

@@ -292,6 +292,37 @@ def test_rounds_only_complete_failure_skipped_partial_kept() -> None:
     assert rep["totals"]["rounds"] == 2
 
 
+def _zero_scores(failures: int = 0) -> dict[str, Any]:
+    return {"raw_breaches": 0, "breaches": 0, "caught": 0, "failures": failures, "false_alarms": 0}
+
+
+def test_rounds_only_clean_only_zero_failure_round_kept() -> None:
+    rec = record(30, {"drex": _zero_scores()}, n_attacks=0, n_clean=5)
+    rep = ar.build_report([], [rec])
+    assert ar.usable_decisions(rep["rounds"][0]["defenders"]["drex"], "rounds.jsonl") == 5
+    assert rep["skipped_rounds"] == []
+    t = rep["totals"]
+    assert (t["rounds"], t["attacks"], t["clean"]) == (1, 0, 5)
+    d = t["defenders"]["drex"]
+    assert d["raw_breaches"] == 0 and d["breaches"] == 0 and d["caught"] == 0
+    assert d["scored"] == 0 and d["failures"] == 0
+
+
+def test_rounds_only_zero_invoice_round_skipped() -> None:
+    rec = record(31, {"drex": _zero_scores()}, n_attacks=0, n_clean=0)
+    rep = ar.build_report([], [rec])
+    assert rep["rounds"] == [] and rep["totals"]["rounds"] == 0
+    assert [(s["round"], s["reason"]) for s in rep["skipped_rounds"]] == [(31, ar.SKIP_NO_USABLE)]
+
+
+def test_rounds_only_all_failed_clean_only_round_skipped() -> None:
+    rec = record(32, {"drex": _zero_scores(failures=5)}, n_attacks=0, n_clean=5)
+    rep = ar.build_report([], [rec])
+    assert rep["rounds"] == [] and rep["totals"]["rounds"] == 0
+    assert [(s["round"], s["reason"]) for s in rep["skipped_rounds"]] == [(32, ar.SKIP_ALL_FAILED)]
+    assert rep["skipped_rounds"][0]["failures"] == {"drex": 5}
+
+
 def test_no_claim_when_every_round_skipped() -> None:
     rep = ar.build_report(_failed_round(18) + _failed_round(19), [])
     assert rep["rounds"] == [] and rep["modes"] == [] and len(rep["skipped_rounds"]) == 2

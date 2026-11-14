@@ -410,13 +410,14 @@ def usable_decisions(s: dict[str, Any], source: str) -> int:
         # Only counts are recorded. Decisions are proven by breaches, caught or false alarms.
         # Without those, every attack row failed; a clean approve counts only for clean rows
         # left over after the recorded failures, and only when failures were recorded at all.
-        # An all-zero record is missing evidence, not a clean run.
+        # An all-zero record with attack rows is missing evidence, not a clean run; with no
+        # attack rows and no failures, every clean row got a non-false-alarm (usable) decision.
         proven = int(s.get("breaches") or 0) + int(s.get("caught") or 0) + int(s.get("false_alarms") or 0)
         if proven:
             return proven
         failures = int(s.get("failures") or 0)
         if not failures:
-            return 0
+            return 0 if int(s.get("forged") or 0) else int(s.get("clean") or 0)
         clean_failures = max(failures - int(s.get("forged") or 0), 0)
         return max(int(s.get("clean") or 0) - clean_failures, 0)
     return ((int(s.get("forged") or 0) - int(s.get("forged_failures") or 0))

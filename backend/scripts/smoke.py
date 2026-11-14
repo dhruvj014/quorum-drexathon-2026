@@ -87,7 +87,7 @@ async def main() -> int:
     if parsed.warnings:
         print(f"warnings: {parsed.warnings}")
 
-    facts = checks.facts(parsed, checks.load_trusted(str(config.TRUSTED_FILE)))
+    facts = checks.facts(parsed, checks.load_trusted())
     print(f"facts: {facts.model_dump()}")
 
     decision = await panel.decide(parsed, facts)

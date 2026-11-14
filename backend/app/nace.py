@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,11 @@ USAGE: dict[str, int] = {
     "ndi_jobs": 0,
     "ndi_pages": 0,
 }
+
+USAGE_KEYS: tuple[str, ...] = tuple(USAGE)
+
+# One id per process, set at import; tags every usage.json line this process writes.
+RUN_ID: str = uuid.uuid4().hex
 
 _client: Any = None
 
@@ -41,7 +47,11 @@ def get_client() -> Any:
 
 
 def bump(usage_file: Path | None = None, **deltas: int) -> None:
-    """Add deltas to USAGE and append a snapshot line to usage.json."""
+    """Add deltas to USAGE and append a snapshot line to usage.json.
+
+    usage.json is JSON lines; each line is {"ts", "run_id", **USAGE}, i.e. this
+    process's cumulative counts so far. See usage_totals for reading.
+    """
     changed = False
     for key, delta in deltas.items():
         if delta:
@@ -51,9 +61,65 @@ def bump(usage_file: Path | None = None, **deltas: int) -> None:
         return
     target = usage_file or config.USAGE_FILE
     target.parent.mkdir(parents=True, exist_ok=True)
-    line = {"ts": datetime.now(timezone.utc).isoformat(), **USAGE}
+    line = {"ts": datetime.now(timezone.utc).isoformat(), "run_id": RUN_ID, **USAGE}
     with target.open("a") as fh:
         fh.write(json.dumps(line) + "\n")
+
+
+def _usage_entries(path: Path) -> list[dict[str, Any]]:
+    """Dict entries of usage.json: JSON lines, or (old format) one JSON dict or list."""
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return []
+    try:
+        whole = json.loads(text)
+    except json.JSONDecodeError:
+        whole = None
+    if isinstance(whole, dict):
+        return [whole]
+    if isinstance(whole, list):
+        return [e for e in whole if isinstance(e, dict)]
+    out: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict):
+            out.append(entry)
+    return out
+
+
+def _count(x: Any) -> int:
+    try:
+        return int(x or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def usage_totals(path: Path | None = None) -> dict[str, int]:
+    """Nace usage summed over all processes that wrote usage.json.
+
+    Each line is a cumulative snapshot for one process. For each run_id the
+    last line is taken, then the counters are summed over runs. Lines without
+    run_id (old format, written before RUN_ID existed) are treated as one
+    legacy run: only the last such line counts. A missing or unreadable file
+    gives all zeros; bad lines are skipped.
+    """
+    target = path or config.USAGE_FILE
+    last: dict[str | None, dict[str, Any]] = {}
+    for entry in _usage_entries(Path(target)):
+        rid = entry.get("run_id")
+        last[str(rid) if rid else None] = entry
+    totals = {k: 0 for k in USAGE_KEYS}
+    for entry in last.values():
+        for k in USAGE_KEYS:
+            totals[k] += _count(entry.get(k))
+    return totals
 
 
 def _to_sdk_question(q: dict[str, Any]) -> Any:
@@ -96,6 +162,19 @@ async def _finish(job: Any) -> Any:
     return job
 
 
+def _error_text(err: Any) -> str | None:
+    """Job error as text (code and message when present), or None."""
+    if not err:
+        return None
+    if isinstance(err, dict):
+        parts = [str(err[k]) for k in ("code", "message") if err.get(k)]
+        return ": ".join(parts) or str(err)
+    code, message = getattr(err, "code", None), getattr(err, "message", None)
+    if code or message:
+        return ": ".join(str(x) for x in (code, message) if x)
+    return str(err)
+
+
 def _pages(result: Any) -> int:
     if isinstance(result, dict):
         for key in ("page_count", "num_pages", "pages"):
@@ -135,6 +214,7 @@ async def ndi_extract(
         "parse_job_id": parse_job.job_id,
         "extract_job_id": extract_job.job_id,
         "status": extract_job.status,
+        "error": _error_text(getattr(extract_job, "error", None)),
         "result": extract_job.result,
         "parse_ms": parse_ms,
     }

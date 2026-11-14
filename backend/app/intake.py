@@ -167,20 +167,57 @@ def build_parsed(path: Path, digest: str, raw: dict[str, Any], parse_ms: int) ->
     )
 
 
+class IntakeError(Exception):
+    """An NDI job that did not succeed. Carries the job status and any error text."""
+
+    def __init__(self, status: str | None, error: str | None = None) -> None:
+        self.status = status
+        self.error = error
+        msg = f"NDI job status {status!r}"
+        if error:
+            msg += f": {error}"
+        super().__init__(msg)
+
+
+def _read_cache(cache_file: Path) -> dict[str, Any] | None:
+    """Cached entry, or None if missing, unreadable or not from a succeeded job."""
+    if not cache_file.exists():
+        return None
+    try:
+        cached = json.loads(cache_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(cached, dict) or "parsed" not in cached:
+        return None
+    raw = cached.get("raw")
+    if not isinstance(raw, dict) or raw.get("status") != "succeeded":
+        return None
+    return cached
+
+
 async def parse_document(path: str | Path, cache_dir: Path | None = None) -> ParsedInvoice:
-    """Parse a PDF with NDI; return the cached result if present."""
+    """Parse a PDF with NDI; return the cached result if present.
+
+    Raises IntakeError when the NDI job did not succeed. Only succeeded results
+    are cached; a cache entry whose raw status is not succeeded is ignored
+    (treated as a miss, the file is left in place).
+    """
     p = Path(path)
     digest = sha256_file(p)
     cdir = cache_dir or config.NDI_CACHE
     cache_file = cdir / f"{digest}.json"
-    if cache_file.exists():
-        cached = json.loads(cache_file.read_text())
+    cached = _read_cache(cache_file)
+    if cached is not None:
         parsed = ParsedInvoice(**cached["parsed"])
         return parsed.model_copy(update={"doc_id": p.stem, "source_file": str(p)})
 
     from backend.app.nace import ndi_extract
 
     raw = await ndi_extract(p, SCHEMA, INSTRUCTIONS)
+    status = raw.get("status")
+    if status != "succeeded":
+        err = raw.get("error")
+        raise IntakeError(status, str(err) if err else None)
     parsed = build_parsed(p, digest, raw, int(raw.get("parse_ms", 0)))
     cdir.mkdir(parents=True, exist_ok=True)
     cache_file.write_text(

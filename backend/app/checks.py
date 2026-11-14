@@ -9,6 +9,7 @@ import json
 import re
 from pathlib import Path
 
+from backend.app import config
 from backend.app.contracts import Facts, ParsedInvoice, TrustedSupplier
 
 
@@ -25,12 +26,24 @@ def normalise_iban(s: str | None) -> str | None:
     return cleaned.upper()
 
 
-def load_trusted(path: str = "data/trusted.json") -> dict[str, TrustedSupplier]:
-    """Load trusted supplier records from a JSON file."""
-    raw: dict[str, dict] = {}
-    resolved = Path(path)
-    if resolved.exists():
+def load_trusted(path: str | Path | None = None) -> dict[str, TrustedSupplier]:
+    """Load trusted supplier records from a JSON file (default config.TRUSTED_FILE).
+
+    Raises FileNotFoundError if the file is missing, and ValueError if the JSON
+    is not an object keyed by supplier id with an object per supplier.
+    """
+    resolved = Path(path) if path is not None else config.TRUSTED_FILE
+    if not resolved.is_file():
+        raise FileNotFoundError(f"trusted supplier file not found: {resolved}")
+    try:
         raw = json.loads(resolved.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"trusted supplier file is not valid JSON: {resolved}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"trusted supplier file must be a JSON object keyed by supplier id: {resolved}")
+    bad = [k for k, v in raw.items() if not k or not isinstance(v, dict)]
+    if bad:
+        raise ValueError(f"trusted supplier entries must be objects keyed by supplier id: {bad[:5]}")
     return {k: TrustedSupplier(**v) for k, v in raw.items()}
 
 

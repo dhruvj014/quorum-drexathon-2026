@@ -22,6 +22,13 @@ from backend.app.contracts import (
 )
 
 
+# Band for the amount_unusual question: ratio of the amount to the supplier median.
+# Untuned default (0.5..2 flagged 28% of clean invoices); to be tuned on the
+# 25 development cases only.
+AMOUNT_RATIO_LOW: float = 0.2
+AMOUNT_RATIO_HIGH: float = 5.0
+
+
 def _noul(instructions: str, yes: str, no: str) -> dict[str, Any]:
     return {"type": "noul", "instructions": instructions, "criteria": {"true": yes, "false": no}}
 
@@ -69,7 +76,8 @@ QUESTIONS: dict[str, dict[str, Any]] = {
     ),
     "amount_unusual": _noul(
         "Is the amount unusual for this supplier?",
-        "The amount ratio to the supplier median is far from 1 (below 0.5 or above 2) or the amount is unreadable.",
+        f"The amount ratio to the supplier median is far from 1 (below {AMOUNT_RATIO_LOW:g} "
+        f"or above {AMOUNT_RATIO_HIGH:g}) or the amount is unreadable.",
         "The amount is in line with the supplier's usual amounts.",
     ),
     "invoice_seen_before": _noul(

@@ -36,7 +36,7 @@ def test_random_iban_deterministic_and_shaped() -> None:
     assert a == forge.random_iban("abc")
     assert a != forge.random_iban("abc-s4")
     assert a.startswith("GB")
-    assert len(a.replace(" ", "")) == 22
+    assert len(a.replace(" ", "")) == 24
     assert all(len(g) == 4 for g in a.split(" ")[:-1])
 
 

@@ -12,6 +12,13 @@ from backend.app.contracts import Facts
 ORDER: dict[str, int] = {"approve": 0, "verify": 1, "block": 2}
 
 
+def _check_action(action: object) -> str:
+    """Return action if it is approve, verify or block; else raise ValueError."""
+    if not isinstance(action, str) or action not in ORDER:
+        raise ValueError(f"unknown action {action!r}; expected one of {list(ORDER)}")
+    return action
+
+
 def risk_score(p: dict[str, float]) -> float:
     """Working risk score: p[block] + 0.5 * p[verify].
 
@@ -30,6 +37,8 @@ def choose(p: dict[str, float], L: float = 100, V: float = 5, D: float = 30) -> 
 
     On a tie, return the stricter action (by ORDER).
     """
+    for key in p:
+        _check_action(key)
     r = risk_score(p)
 
     cost_approve = r * L
@@ -69,7 +78,7 @@ def guard(action: str, facts: Facts | dict[str, Any]) -> tuple[str, list[str]]:
     else:
         f = Facts(**{k: facts[k] for k in Facts.model_fields if k in facts})
 
-    current_order = ORDER.get(action, 0)
+    current_order = ORDER[_check_action(action)]
     findings: list[str] = []
 
     # Condition 1: iban_status not "found"

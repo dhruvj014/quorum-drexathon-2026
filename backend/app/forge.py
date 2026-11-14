@@ -80,8 +80,11 @@ def load_words(doc_id: str) -> str:
     return _read_row(doc_id, ["words"])["words"]
 
 
-def random_iban(seed: str, country: str = "GB", length: int = 22) -> str:
-    """Deterministic fake IBAN (no valid checksum), printed in groups of four."""
+def random_iban(seed: str, country: str = "GB", length: int = 24) -> str:
+    """Deterministic fake IBAN (no valid checksum), printed in groups of four.
+
+    Default length 24 matches the dataset, e.g. "GB18 1790 8734 9062 1374 9599".
+    """
     rng = random.Random(seed)
     raw = country + "".join(str(rng.randrange(10)) for _ in range(length - len(country)))
     return " ".join(raw[i:i + 4] for i in range(0, len(raw), 4))

@@ -1,8 +1,9 @@
 /dataset
 /.venv
 /venv
-/.plans
+# /.plans
 /.intern-home
+/.plans/from-himanshu
 
 # Python
 __pycache__/
